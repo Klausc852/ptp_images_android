@@ -25,37 +25,45 @@ class MainActivity : FlutterActivity() {
     
     private val coroutineScope = CoroutineScope(Dispatchers.Main + Job())
 
+    // Helper function to safely get UsbDevice from intent
+    private fun getUsbDevice(intent: Intent): UsbDevice? {
+        return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+        }
+    }
+    
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
             
-            // Fix for deprecated getParcelableExtra
-            fun getUsbDevice(intent: Intent): UsbDevice? {
-                return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                    intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
-                } else {
-                    @Suppress("DEPRECATION")
-                    intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
-                }
-            }
+            if (intent == null) return
             
-            when (intent?.action) {
-                UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
-                    val device = getUsbDevice(intent)
-                    Log.i(TAG, "[$timestamp] USB device attached: ${device?.deviceName}, VendorID: 0x${device?.vendorId?.toString(16)}, ProductID: 0x${device?.productId?.toString(16)}")
-                    // Canon device check
-                    if (device?.vendorId == 0x04a9) {
-                        Log.i(TAG, "[$timestamp] Canon camera detected")
+            try {
+                when (intent.action) {
+                    UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                        val device = getUsbDevice(intent)
+                        Log.i(TAG, "[$timestamp] USB device attached: ${device?.deviceName}, VendorID: 0x${device?.vendorId?.toString(16)}, ProductID: 0x${device?.productId?.toString(16)}")
+                        // Canon device check
+                        if (device?.vendorId == 0x04a9) {
+                            Log.i(TAG, "[$timestamp] Canon camera detected")
+                        }
                     }
-                }
-                UsbManager.ACTION_USB_DEVICE_DETACHED -> {
-                    val device = getUsbDevice(intent)
-                    Log.i(TAG, "[$timestamp] USB device detached: ${device?.deviceName}")
-                    // If our connected device was detached, release resources
-                    if (ptpController.getConnectedDeviceInfo()?.get("deviceName") == device?.deviceName) {
-                        ptpController.release()
+                    UsbManager.ACTION_USB_DEVICE_DETACHED -> {
+                        val device = getUsbDevice(intent)
+                        Log.i(TAG, "[$timestamp] USB device detached: ${device?.deviceName}")
+                        // If our connected device was detached, release resources
+                        if (ptpController.getConnectedDeviceInfo()?.get("deviceName") == device?.deviceName) {
+                            ptpController.release()
+                        }
                     }
+                    // We don't handle ACTION_USB_PERMISSION in the main receiver anymore
                 }
+            } catch (e: Exception) {
+                Log.e(TAG, "[$timestamp] Error in USB broadcast receiver: ${e.message}")
+                e.printStackTrace()
             }
         }
     }
@@ -102,7 +110,7 @@ class MainActivity : FlutterActivity() {
         val usbDeviceFilter = IntentFilter().apply {
             addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
             addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
-            // We'll handle USB permission differently to avoid crash
+            // Don't listen for permission responses in the main receiver to avoid conflicts
         }
         registerReceiver(usbReceiver, usbDeviceFilter)
     }
@@ -121,6 +129,15 @@ class MainActivity : FlutterActivity() {
             return
         }
         
+        // Setup timeout job
+        val timeoutJob = coroutineScope.launch {
+            delay(20000) // 20 seconds timeout
+            if (isActive) {
+                Log.e(TAG, "[$timestamp] Camera initialization timed out after 20 seconds")
+                result.error("TIMEOUT", "Camera initialization timed out", null)
+            }
+        }
+        
         // Find compatible camera
         val (found, _) = ptpController.findCamera()
         if (found) {
@@ -136,6 +153,7 @@ class MainActivity : FlutterActivity() {
                 if (usbManager?.hasPermission(device) == true) {
                     Log.i(TAG, "[$timestamp] Permission already granted, setting up device")
                     val success = ptpController.setupDevice(device)
+                    timeoutJob.cancel() // Cancel timeout
                     if (success) {
                         Log.i(TAG, "[$timestamp] Device setup successful")
                         result.success(mapOf(
@@ -147,64 +165,62 @@ class MainActivity : FlutterActivity() {
                         result.error("SETUP_ERROR", "Failed to set up camera connection", null)
                     }
                 } else {
-                    // Create a one-time receiver for this specific permission request
-                    val permissionReceiver = object : BroadcastReceiver() {
-                        override fun onReceive(context: Context?, intent: Intent?) {
-                            if (ACTION_USB_PERMISSION == intent?.action) {
-                                val permDevice: UsbDevice? = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                                    intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
-                                } else {
-                                    @Suppress("DEPRECATION")
-                                    intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
-                                }
-                                
-                                if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-                                    permDevice?.let { dev ->
-                                        Log.i(TAG, "[$timestamp] USB permission granted for device: ${dev.deviceName}")
-                                        val success = ptpController.setupDevice(dev)
-                                        if (success) {
-                                            Log.i(TAG, "[$timestamp] Device setup successful")
-                                            result.success(mapOf(
-                                                "connected" to true,
-                                                "message" to "Camera connected successfully"
-                                            ))
-                                        } else {
-                                            Log.e(TAG, "[$timestamp] Device setup failed")
-                                            result.error("SETUP_ERROR", "Failed to set up camera connection", null)
-                                        }
-                                    }
-                                } else {
-                                    Log.w(TAG, "[$timestamp] USB permission denied for device: ${permDevice?.deviceName}")
-                                    result.error("PERMISSION_DENIED", "Permission denied to access camera", null)
-                                }
-                                
-                                // Unregister after use
-                                context?.unregisterReceiver(this)
-                            }
-                        }
-                    }
+                    // No need for a separate permission receiver - handle permission directly
+                    // This simpler approach should be more stable
+                    Log.d(TAG, "[$timestamp] Setting up direct permission handling")
                     
-                    // Register the receiver for this specific action
-                    val permissionFilter = IntentFilter(ACTION_USB_PERMISSION)
-                    registerReceiver(permissionReceiver, permissionFilter)
+                    try {
+                        // Just request permission without a custom broadcast receiver
+                        val permissionIntent = PendingIntent.getActivity(
+                            this,
+                            0,
+                            Intent(this, MainActivity::class.java),  // Return to this activity
+                            PendingIntent.FLAG_IMMUTABLE
+                        )
+                        
+                        usbManager?.requestPermission(device, permissionIntent)
+                        
+                        // Since we're going through the activity, we'll handle permission in onResume
+                        // Return success now to prevent hanging the Flutter connection
+                        timeoutJob.cancel()
+                        result.success(mapOf(
+                            "connected" to false,
+                            "message" to "Permission dialog shown to user",
+                            "status" to "PERMISSION_REQUESTED"
+                        ))
+                    } catch (e: Exception) {
+                        Log.e(TAG, "[$timestamp] Error setting up permission: ${e.message}")
+                        timeoutJob.cancel()
+                        result.error("PERMISSION_ERROR", "Failed to request permission: ${e.message}", null)
+                    }
                     
                     // Request permission
                     Log.d(TAG, "[$timestamp] Requesting permission for camera: ${device.deviceName}")
-                    val permissionIntent = PendingIntent.getBroadcast(
-                        this,
-                        0,
-                        Intent(ACTION_USB_PERMISSION),
-                        PendingIntent.FLAG_IMMUTABLE
-                    )
-                    usbManager?.requestPermission(device, permissionIntent)
-                    
-                    // Don't return a result yet - it will be returned by the receiver when permission is granted/denied
+                    try {
+                        val permissionIntent = PendingIntent.getBroadcast(
+                            this,
+                            0,
+                            Intent(ACTION_USB_PERMISSION),
+                            PendingIntent.FLAG_IMMUTABLE
+                        )
+                        usbManager?.requestPermission(device, permissionIntent)
+                        
+                        // Don't send any result yet - just log that we're waiting
+                        Log.i(TAG, "[$timestamp] Waiting for user permission response")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "[$timestamp] Error requesting permission: ${e.message}")
+                        timeoutJob.cancel()
+                        result.error("PERMISSION_REQUEST_ERROR", "Failed to request permission: ${e.message}", null)
+                    }
+                    // The final result will be returned by the permission receiver
                 }
             } else {
+                timeoutJob.cancel() // Cancel timeout
                 Log.e(TAG, "[$timestamp] Error: Device found but couldn't be retrieved")
                 result.error("DEVICE_ERROR", "Device found but couldn't be retrieved", null)
             }
         } else {
+            timeoutJob.cancel() // Cancel timeout
             Log.e(TAG, "[$timestamp] No compatible camera found")
             result.error("NO_DEVICE", "No compatible camera found", null)
         }
@@ -320,6 +336,24 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+        Log.d(TAG, "[$timestamp] Activity resumed, checking for camera connection")
+        
+        // Check if we have a camera that needs setup
+        if (!ptpController.isConnected()) {
+            val canonDevice = usbManager?.deviceList?.values?.find { device ->
+                device.vendorId == 0x04a9 // Canon vendor ID
+            }
+            
+            if (canonDevice != null && usbManager?.hasPermission(canonDevice) == true) {
+                Log.i(TAG, "[$timestamp] Found Canon camera with permission in onResume, setting up")
+                ptpController.setupDevice(canonDevice)
+            }
+        }
+    }
+    
     override fun onDestroy() {
         super.onDestroy()
         coroutineScope.cancel()

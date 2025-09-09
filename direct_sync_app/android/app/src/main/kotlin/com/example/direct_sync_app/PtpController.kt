@@ -328,35 +328,35 @@ class PtpController(private val context: Context) {
         logMessage("Interface count: ${device.interfaceCount}")
         
         // Log details about each interface
-        for (i in 0 until device.interfaceCount) {
-            val intf = device.getInterface(i)
-            logMessage("Interface #$i:")
-            logMessage("  ID: ${intf.id}")
-            logMessage("  Interface class: ${intf.interfaceClass}")
-            logMessage("  Interface subclass: ${intf.interfaceSubclass}")
-            logMessage("  Protocol: ${intf.interfaceProtocol}")
-            logMessage("  Endpoint count: ${intf.endpointCount}")
+        // for (i in 0 until device.interfaceCount) {
+        //     val intf = device.getInterface(i)
+        //     logMessage("Interface #$i:")
+        //     logMessage("  ID: ${intf.id}")
+        //     logMessage("  Interface class: ${intf.interfaceClass}")
+        //     logMessage("  Interface subclass: ${intf.interfaceSubclass}")
+        //     logMessage("  Protocol: ${intf.interfaceProtocol}")
+        //     logMessage("  Endpoint count: ${intf.endpointCount}")
             
-            // Log details about each endpoint
-            for (j in 0 until intf.endpointCount) {
-                val endpoint = intf.getEndpoint(j)
-                val type = when (endpoint.type) {
-                    UsbConstants.USB_ENDPOINT_XFER_CONTROL -> "CONTROL"
-                    UsbConstants.USB_ENDPOINT_XFER_ISOC -> "ISOCHRONOUS"
-                    UsbConstants.USB_ENDPOINT_XFER_BULK -> "BULK"
-                    UsbConstants.USB_ENDPOINT_XFER_INT -> "INTERRUPT"
-                    else -> "UNKNOWN"
-                }
-                val direction = if (endpoint.direction == UsbConstants.USB_DIR_IN) "IN" else "OUT"
-                logMessage("    Endpoint #$j:")
-                logMessage("      Address: ${endpoint.address}")
-                logMessage("      Number: ${endpoint.endpointNumber}")
-                logMessage("      Type: $type")
-                logMessage("      Direction: $direction")
-                logMessage("      Max packet size: ${endpoint.maxPacketSize}")
-                logMessage("      Interval: ${endpoint.interval}")
-            }
-        }
+        //     // Log details about each endpoint
+        //     for (j in 0 until intf.endpointCount) {
+        //         val endpoint = intf.getEndpoint(j)
+        //         val type = when (endpoint.type) {
+        //             UsbConstants.USB_ENDPOINT_XFER_CONTROL -> "CONTROL"
+        //             UsbConstants.USB_ENDPOINT_XFER_ISOC -> "ISOCHRONOUS"
+        //             UsbConstants.USB_ENDPOINT_XFER_BULK -> "BULK"
+        //             UsbConstants.USB_ENDPOINT_XFER_INT -> "INTERRUPT"
+        //             else -> "UNKNOWN"
+        //         }
+        //         val direction = if (endpoint.direction == UsbConstants.USB_DIR_IN) "IN" else "OUT"
+        //         logMessage("    Endpoint #$j:")
+        //         logMessage("      Address: ${endpoint.address}")
+        //         logMessage("      Number: ${endpoint.endpointNumber}")
+        //         logMessage("      Type: $type")
+        //         logMessage("      Direction: $direction")
+        //         logMessage("      Max packet size: ${endpoint.maxPacketSize}")
+        //         logMessage("      Interval: ${endpoint.interval}")
+        //     }
+        // }
         logMessage("===================")
     }
     
