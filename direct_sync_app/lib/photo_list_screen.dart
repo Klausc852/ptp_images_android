@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 // Use the same method channel defined in main.dart
-const platform = MethodChannel('com.example.direct_sync_app/ptp');
+const platform = MethodChannel('com.example.direct_sync_app/camera');
 
 class PhotoListScreen extends StatefulWidget {
   const PhotoListScreen({Key? key}) : super(key: key);

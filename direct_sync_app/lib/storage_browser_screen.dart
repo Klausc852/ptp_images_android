@@ -8,7 +8,7 @@ import 'dart:io';
 const platform = MethodChannel('com.example.direct_sync_app/camera');
 
 class StorageBrowserScreen extends StatefulWidget {
-  const StorageBrowserScreen({Key? key}) : super(key: key);
+  const StorageBrowserScreen({super.key});
 
   @override
   State<StorageBrowserScreen> createState() => _StorageBrowserScreenState();
@@ -16,13 +16,11 @@ class StorageBrowserScreen extends StatefulWidget {
 
 class _StorageBrowserScreenState extends State<StorageBrowserScreen> {
   bool _isLoading = true;
-  bool _isConnected = false;
   String _errorMessage = '';
-  List<int> _storageIds = [];
-  Map<int, List<int>> _objectHandles = {};
-  Map<int, Map<String, dynamic>> _objectInfos = {};
-  Map<int, String> _localPaths = {};
-  bool _showStorageList = true;
+  List<int> _storageIds = []; // Removed 'final' to allow reassignment
+  final Map<int, List<int>> _objectHandles = {};
+  final Map<int, Map<String, dynamic>> _objectInfos = {};
+  Map<String, dynamic> _storageData = {};
 
   @override
   void initState() {

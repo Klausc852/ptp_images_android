@@ -12,31 +12,48 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.*
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
+import java.text.SimpleDateFormat
+import java.util.*
 
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.example.direct_sync_app/camera"
     private val ACTION_USB_PERMISSION = "com.example.direct_sync_app.USB_PERMISSION"
+    private val TAG = "CameraConnection"
     
     private var usbManager: UsbManager? = null
-    private var usbDevice: UsbDevice? = null
-    private var usbDeviceConnection: UsbDeviceConnection? = null
-    private var usbInterface: UsbInterface? = null
-    private var endpointIn: UsbEndpoint? = null
-    private var endpointOut: UsbEndpoint? = null
+    private lateinit var ptpController: PtpController
     
     private val coroutineScope = CoroutineScope(Dispatchers.Main + Job())
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (ACTION_USB_PERMISSION == intent?.action) {
-                synchronized(this) {
-                    val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
-                    if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-                        device?.apply {
-                            setupDevice(this)
-                        }
+            val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+            
+            // Fix for deprecated getParcelableExtra
+            fun getUsbDevice(intent: Intent): UsbDevice? {
+                return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                }
+            }
+            
+            when (intent?.action) {
+                UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                    val device = getUsbDevice(intent)
+                    Log.i(TAG, "[$timestamp] USB device attached: ${device?.deviceName}, VendorID: 0x${device?.vendorId?.toString(16)}, ProductID: 0x${device?.productId?.toString(16)}")
+                    // Canon device check
+                    if (device?.vendorId == 0x04a9) {
+                        Log.i(TAG, "[$timestamp] Canon camera detected")
+                    }
+                }
+                UsbManager.ACTION_USB_DEVICE_DETACHED -> {
+                    val device = getUsbDevice(intent)
+                    Log.i(TAG, "[$timestamp] USB device detached: ${device?.deviceName}")
+                    // If our connected device was detached, release resources
+                    if (ptpController.getConnectedDeviceInfo()?.get("deviceName") == device?.deviceName) {
+                        ptpController.release()
                     }
                 }
             }
@@ -77,179 +94,236 @@ class MainActivity : FlutterActivity() {
         super.onCreate(savedInstanceState)
         
         usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
+        ptpController = PtpController(this)
+        
+        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+        Log.i(TAG, "[$timestamp] MainActivity created, PTP Controller initialized")
         
         val usbDeviceFilter = IntentFilter().apply {
             addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
-            addAction(UsbManager.ACTION_USB_DEVICE_DETACHED) 
+            addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
+            // We'll handle USB permission differently to avoid crash
         }
         registerReceiver(usbReceiver, usbDeviceFilter)
     }
 
     private fun initializeCamera(result: MethodChannel.Result) {
-        usbManager?.deviceList?.values?.find { device ->
-            // Canon cameras typically use these vendor IDs
-            device.vendorId == 0x04a9
-        }?.let { device ->
-            usbDevice = device
-            val permissionIntent = PendingIntent.getBroadcast(
-                this,
-                0,
-                Intent(ACTION_USB_PERMISSION),
-                PendingIntent.FLAG_IMMUTABLE
-            )
-            usbManager?.requestPermission(device, permissionIntent)
-            result.success(true)
-        } ?: result.error("NO_DEVICE", "No Canon camera found", null)
-    }
-
-    private fun setupDevice(device: UsbDevice) {
-        usbDeviceConnection = usbManager?.openDevice(device)
-        usbInterface = device.getInterface(0)
+        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+        Log.d(TAG, "[$timestamp] Flutter requested camera initialization")
         
-        usbDeviceConnection?.claimInterface(usbInterface, true)
+        // Check if already connected
+        if (ptpController.isConnected()) {
+            Log.i(TAG, "[$timestamp] Camera already connected")
+            result.success(mapOf(
+                "connected" to true,
+                "message" to "Camera already connected"
+            ))
+            return
+        }
         
-        // Find bulk endpoints
-        for (i in 0 until usbInterface?.endpointCount!!) {
-            val endpoint = usbInterface?.getEndpoint(i)
-            if (endpoint?.type == UsbConstants.USB_ENDPOINT_XFER_BULK) {
-                if (endpoint.direction == UsbConstants.USB_DIR_IN) {
-                    endpointIn = endpoint
-                } else if (endpoint.direction == UsbConstants.USB_DIR_OUT) {
-                    endpointOut = endpoint
-                }
+        // Find compatible camera
+        val (found, _) = ptpController.findCamera()
+        if (found) {
+            // Device found, attempt direct connection
+            val device = usbManager?.deviceList?.values?.find { device ->
+                device.vendorId == 0x04a9 // Canon vendor ID
             }
+            
+            if (device != null) {
+                Log.d(TAG, "[$timestamp] Trying to connect to camera: ${device.deviceName}")
+                
+                // Check if permission is already granted
+                if (usbManager?.hasPermission(device) == true) {
+                    Log.i(TAG, "[$timestamp] Permission already granted, setting up device")
+                    val success = ptpController.setupDevice(device)
+                    if (success) {
+                        Log.i(TAG, "[$timestamp] Device setup successful")
+                        result.success(mapOf(
+                            "connected" to true,
+                            "message" to "Camera connected successfully"
+                        ))
+                    } else {
+                        Log.e(TAG, "[$timestamp] Device setup failed")
+                        result.error("SETUP_ERROR", "Failed to set up camera connection", null)
+                    }
+                } else {
+                    // Create a one-time receiver for this specific permission request
+                    val permissionReceiver = object : BroadcastReceiver() {
+                        override fun onReceive(context: Context?, intent: Intent?) {
+                            if (ACTION_USB_PERMISSION == intent?.action) {
+                                val permDevice: UsbDevice? = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                                    intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                                } else {
+                                    @Suppress("DEPRECATION")
+                                    intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                                }
+                                
+                                if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
+                                    permDevice?.let { dev ->
+                                        Log.i(TAG, "[$timestamp] USB permission granted for device: ${dev.deviceName}")
+                                        val success = ptpController.setupDevice(dev)
+                                        if (success) {
+                                            Log.i(TAG, "[$timestamp] Device setup successful")
+                                            result.success(mapOf(
+                                                "connected" to true,
+                                                "message" to "Camera connected successfully"
+                                            ))
+                                        } else {
+                                            Log.e(TAG, "[$timestamp] Device setup failed")
+                                            result.error("SETUP_ERROR", "Failed to set up camera connection", null)
+                                        }
+                                    }
+                                } else {
+                                    Log.w(TAG, "[$timestamp] USB permission denied for device: ${permDevice?.deviceName}")
+                                    result.error("PERMISSION_DENIED", "Permission denied to access camera", null)
+                                }
+                                
+                                // Unregister after use
+                                context?.unregisterReceiver(this)
+                            }
+                        }
+                    }
+                    
+                    // Register the receiver for this specific action
+                    val permissionFilter = IntentFilter(ACTION_USB_PERMISSION)
+                    registerReceiver(permissionReceiver, permissionFilter)
+                    
+                    // Request permission
+                    Log.d(TAG, "[$timestamp] Requesting permission for camera: ${device.deviceName}")
+                    val permissionIntent = PendingIntent.getBroadcast(
+                        this,
+                        0,
+                        Intent(ACTION_USB_PERMISSION),
+                        PendingIntent.FLAG_IMMUTABLE
+                    )
+                    usbManager?.requestPermission(device, permissionIntent)
+                    
+                    // Don't return a result yet - it will be returned by the receiver when permission is granted/denied
+                }
+            } else {
+                Log.e(TAG, "[$timestamp] Error: Device found but couldn't be retrieved")
+                result.error("DEVICE_ERROR", "Device found but couldn't be retrieved", null)
+            }
+        } else {
+            Log.e(TAG, "[$timestamp] No compatible camera found")
+            result.error("NO_DEVICE", "No compatible camera found", null)
         }
     }
 
+
+
     private fun getStorageIds(result: MethodChannel.Result) {
+        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+        Log.d(TAG, "[$timestamp] Flutter requested storage IDs")
+        
         coroutineScope.launch {
             try {
-                val command = ByteBuffer.allocate(12)
-                command.order(ByteOrder.LITTLE_ENDIAN)
-                command.putInt(12) // Length
-                command.putShort(1) // Type (command block)
-                command.putShort(0x1004) // Operation code (GetStorageIDs)
-                command.putInt(0) // Transaction ID
-                
-                sendPtpCommand(command.array())
-                
-                val response = receivePtpData()
-                val storageIds = response?.let {
-                    val buffer = ByteBuffer.wrap(it)
-                    buffer.order(ByteOrder.LITTLE_ENDIAN)
-                    val count = buffer.getInt(0)
-                    val ids = ArrayList<Int>()
-                    for (i in 0 until count) {
-                        ids.add(buffer.getInt(4 + i * 4))
-                    }
-                    ids
+                if (!ptpController.isConnected()) {
+                    Log.e(TAG, "[$timestamp] Camera not connected")
+                    result.error("NOT_CONNECTED", "Camera not connected", null)
+                    return@launch
                 }
                 
-                result.success(storageIds)
+                val storageIds = ptpController.getStorageIds()
+                if (storageIds != null) {
+                    Log.d(TAG, "[$timestamp] Returning ${storageIds.size} storage IDs to Flutter")
+                    result.success(storageIds)
+                } else {
+                    Log.e(TAG, "[$timestamp] Failed to get storage IDs")
+                    result.error("PTP_ERROR", "Failed to get storage IDs", null)
+                }
             } catch (e: Exception) {
+                Log.e(TAG, "[$timestamp] Error getting storage IDs: ${e.message}")
                 result.error("PTP_ERROR", e.message, null)
             }
         }
     }
 
     private fun getObjectHandles(storageId: Int, result: MethodChannel.Result) {
+        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+        Log.d(TAG, "[$timestamp] Flutter requested object handles for storage $storageId")
+        
         coroutineScope.launch {
             try {
-                val command = ByteBuffer.allocate(16)
-                command.order(ByteOrder.LITTLE_ENDIAN)
-                command.putInt(16) // Length
-                command.putShort(1) // Type
-                command.putShort(0x1007) // Operation code (GetObjectHandles)
-                command.putInt(0) // Transaction ID
-                command.putInt(storageId) // Storage ID
-                
-                sendPtpCommand(command.array())
-                
-                val response = receivePtpData()
-                val objectHandles = response?.let {
-                    val buffer = ByteBuffer.wrap(it)
-                    buffer.order(ByteOrder.LITTLE_ENDIAN)
-                    val count = buffer.getInt(0)
-                    val handles = ArrayList<Int>()
-                    for (i in 0 until count) {
-                        handles.add(buffer.getInt(4 + i * 4))
-                    }
-                    handles
+                if (!ptpController.isConnected()) {
+                    Log.e(TAG, "[$timestamp] Camera not connected")
+                    result.error("NOT_CONNECTED", "Camera not connected", null)
+                    return@launch
                 }
                 
-                result.success(objectHandles)
+                val objectHandles = ptpController.getObjectHandles(storageId)
+                if (objectHandles != null) {
+                    Log.d(TAG, "[$timestamp] Returning ${objectHandles.size} object handles to Flutter")
+                    result.success(objectHandles)
+                } else {
+                    Log.e(TAG, "[$timestamp] Failed to get object handles")
+                    result.error("PTP_ERROR", "Failed to get object handles", null)
+                }
             } catch (e: Exception) {
+                Log.e(TAG, "[$timestamp] Error getting object handles: ${e.message}")
                 result.error("PTP_ERROR", e.message, null)
             }
         }
     }
 
     private fun getObjectInfo(objectHandle: Int, result: MethodChannel.Result) {
+        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+        Log.d(TAG, "[$timestamp] Flutter requested info for object $objectHandle")
+        
         coroutineScope.launch {
             try {
-                val command = ByteBuffer.allocate(16)
-                command.order(ByteOrder.LITTLE_ENDIAN)
-                command.putInt(16) // Length
-                command.putShort(1) // Type
-                command.putShort(0x1008) // Operation code (GetObjectInfo)
-                command.putInt(0) // Transaction ID
-                command.putInt(objectHandle)
-                
-                sendPtpCommand(command.array())
-                
-                val response = receivePtpData()
-                // Parse object info and return as Map
-                val info = response?.let {
-                    mapOf(
-                        "objectHandle" to objectHandle,
-                        "format" to ByteBuffer.wrap(it, 4, 2).order(ByteOrder.LITTLE_ENDIAN).short,
-                        "size" to ByteBuffer.wrap(it, 8, 4).order(ByteOrder.LITTLE_ENDIAN).int
-                    )
+                if (!ptpController.isConnected()) {
+                    Log.e(TAG, "[$timestamp] Camera not connected")
+                    result.error("NOT_CONNECTED", "Camera not connected", null)
+                    return@launch
                 }
                 
-                result.success(info)
+                val info = ptpController.getObjectInfo(objectHandle)
+                if (info != null) {
+                    Log.d(TAG, "[$timestamp] Returning object info to Flutter")
+                    result.success(info)
+                } else {
+                    Log.e(TAG, "[$timestamp] Failed to get object info")
+                    result.error("PTP_ERROR", "Failed to get object info", null)
+                }
             } catch (e: Exception) {
+                Log.e(TAG, "[$timestamp] Error getting object info: ${e.message}")
                 result.error("PTP_ERROR", e.message, null)
             }
         }
     }
 
     private fun getObject(objectHandle: Int, result: MethodChannel.Result) {
+        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+        Log.d(TAG, "[$timestamp] Flutter requested download for object $objectHandle")
+        
         coroutineScope.launch {
             try {
-                val command = ByteBuffer.allocate(16)
-                command.order(ByteOrder.LITTLE_ENDIAN)
-                command.putInt(16) // Length
-                command.putShort(1) // Type
-                command.putShort(0x1009) // Operation code (GetObject)
-                command.putInt(0) // Transaction ID
-                command.putInt(objectHandle)
+                if (!ptpController.isConnected()) {
+                    Log.e(TAG, "[$timestamp] Camera not connected")
+                    result.error("NOT_CONNECTED", "Camera not connected", null)
+                    return@launch
+                }
                 
-                sendPtpCommand(command.array())
-                
-                val response = receivePtpData()
-                result.success(response)
+                val data = ptpController.getObject(objectHandle)
+                if (data != null) {
+                    Log.d(TAG, "[$timestamp] Returning object data (${data.size} bytes) to Flutter")
+                    result.success(data)
+                } else {
+                    Log.e(TAG, "[$timestamp] Failed to download object")
+                    result.error("PTP_ERROR", "Failed to download object", null)
+                }
             } catch (e: Exception) {
+                Log.e(TAG, "[$timestamp] Error downloading object: ${e.message}")
                 result.error("PTP_ERROR", e.message, null)
             }
         }
-    }
-
-    private suspend fun sendPtpCommand(command: ByteArray) = withContext(Dispatchers.IO) {
-        usbDeviceConnection?.bulkTransfer(endpointOut, command, command.size, 5000)
-    }
-
-    private suspend fun receivePtpData(): ByteArray? = withContext(Dispatchers.IO) {
-        val buffer = ByteArray(1024 * 1024) // 1MB buffer
-        val length = usbDeviceConnection?.bulkTransfer(endpointIn, buffer, buffer.size, 5000)
-        return@withContext if (length != null && length > 0) buffer.copyOf(length) else null
     }
 
     override fun onDestroy() {
         super.onDestroy()
         coroutineScope.cancel()
         unregisterReceiver(usbReceiver)
-        usbDeviceConnection?.releaseInterface(usbInterface)
-        usbDeviceConnection?.close()
+        ptpController.release()
     }
 }
