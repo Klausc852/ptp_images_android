@@ -20,8 +20,19 @@ class MainActivity : FlutterActivity() {
     private val ACTION_USB_PERMISSION = "com.example.direct_sync_app.USB_PERMISSION"
     private val TAG = "CameraConnection"
     
+    // Connection types
+    private enum class ConnectionType {
+        NONE,
+        USB,
+        WIFI
+    }
+    
     private var usbManager: UsbManager? = null
     private lateinit var ptpController: PtpController
+    private lateinit var ptpIpController: PtpIpController
+    
+    // Track the active connection type
+    private var activeConnectionType = ConnectionType.NONE
     
     private val coroutineScope = CoroutineScope(Dispatchers.Main + Job())
 
@@ -76,6 +87,14 @@ class MainActivity : FlutterActivity() {
                 "initializeCamera" -> {
                     initializeCamera(result)
                 }
+                "connectToWifiCamera" -> {
+                    val ipAddress = call.argument<String>("ipAddress") ?: ""
+                    val port = call.argument<Int>("port") ?: 15740
+                    connectToWifiCamera(ipAddress, port, result)
+                }
+                "disconnectCamera" -> {
+                    disconnectCamera(result)
+                }
                 "getStorageIds" -> {
                     getStorageIds(result)
                 }
@@ -103,9 +122,13 @@ class MainActivity : FlutterActivity() {
         
         usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
         ptpController = PtpController(this)
+        ptpIpController = PtpIpController()
         
         val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
-        Log.i(TAG, "[$timestamp] MainActivity created, PTP Controller initialized")
+        Log.i(TAG, "[$timestamp] MainActivity created, PTP Controllers initialized")
+        
+        // Setup the new object listener for automatic photo detection
+        setupNewPhotoListener()
         
         val usbDeviceFilter = IntentFilter().apply {
             addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
@@ -156,12 +179,15 @@ class MainActivity : FlutterActivity() {
                     timeoutJob.cancel() // Cancel timeout
                     if (success) {
                         Log.i(TAG, "[$timestamp] Device setup successful")
+                        activeConnectionType = ConnectionType.USB
                         result.success(mapOf(
                             "connected" to true,
-                            "message" to "Camera connected successfully"
+                            "message" to "Camera connected successfully",
+                            "connectionType" to "USB"
                         ))
                     } else {
                         Log.e(TAG, "[$timestamp] Device setup failed")
+                        activeConnectionType = ConnectionType.NONE
                         result.error("SETUP_ERROR", "Failed to set up camera connection", null)
                     }
                 } else {
@@ -234,19 +260,39 @@ class MainActivity : FlutterActivity() {
         
         coroutineScope.launch {
             try {
-                if (!ptpController.isConnected()) {
-                    Log.e(TAG, "[$timestamp] Camera not connected")
-                    result.error("NOT_CONNECTED", "Camera not connected", null)
-                    return@launch
-                }
-                
-                val storageIds = ptpController.getStorageIds()
-                if (storageIds != null) {
-                    Log.d(TAG, "[$timestamp] Returning ${storageIds.size} storage IDs to Flutter")
-                    result.success(storageIds)
-                } else {
-                    Log.e(TAG, "[$timestamp] Failed to get storage IDs")
-                    result.error("PTP_ERROR", "Failed to get storage IDs", null)
+                when (activeConnectionType) {
+                    ConnectionType.NONE -> {
+                        Log.e(TAG, "[$timestamp] Camera not connected")
+                        result.error("NOT_CONNECTED", "Camera not connected", null)
+                        return@launch
+                    }
+                    ConnectionType.USB -> {
+                        if (!ptpController.isConnected()) {
+                            Log.e(TAG, "[$timestamp] USB camera connection lost")
+                            activeConnectionType = ConnectionType.NONE
+                            result.error("NOT_CONNECTED", "Camera connection lost", null)
+                            return@launch
+                        }
+                        
+                        val storageIds = ptpController.getStorageIds()
+                        if (storageIds != null) {
+                            Log.d(TAG, "[$timestamp] Returning ${storageIds.size} storage IDs to Flutter from USB")
+                            result.success(storageIds)
+                        } else {
+                            Log.e(TAG, "[$timestamp] Failed to get storage IDs from USB")
+                            result.error("PTP_ERROR", "Failed to get storage IDs", null)
+                        }
+                    }
+                    ConnectionType.WIFI -> {
+                        val storageIds = ptpIpController.getStorageIds()
+                        if (storageIds != null) {
+                            Log.d(TAG, "[$timestamp] Returning ${storageIds.size} storage IDs to Flutter from WiFi")
+                            result.success(storageIds)
+                        } else {
+                            Log.e(TAG, "[$timestamp] Failed to get storage IDs from WiFi")
+                            result.error("PTP_ERROR", "Failed to get storage IDs", null)
+                        }
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "[$timestamp] Error getting storage IDs: ${e.message}")
@@ -261,19 +307,39 @@ class MainActivity : FlutterActivity() {
         
         coroutineScope.launch {
             try {
-                if (!ptpController.isConnected()) {
-                    Log.e(TAG, "[$timestamp] Camera not connected")
-                    result.error("NOT_CONNECTED", "Camera not connected", null)
-                    return@launch
-                }
-                
-                val objectHandles = ptpController.getObjectHandles(storageId)
-                if (objectHandles != null) {
-                    Log.d(TAG, "[$timestamp] Returning ${objectHandles.size} object handles to Flutter")
-                    result.success(objectHandles)
-                } else {
-                    Log.e(TAG, "[$timestamp] Failed to get object handles")
-                    result.error("PTP_ERROR", "Failed to get object handles", null)
+                when (activeConnectionType) {
+                    ConnectionType.NONE -> {
+                        Log.e(TAG, "[$timestamp] Camera not connected")
+                        result.error("NOT_CONNECTED", "Camera not connected", null)
+                        return@launch
+                    }
+                    ConnectionType.USB -> {
+                        if (!ptpController.isConnected()) {
+                            Log.e(TAG, "[$timestamp] USB camera connection lost")
+                            activeConnectionType = ConnectionType.NONE
+                            result.error("NOT_CONNECTED", "Camera connection lost", null)
+                            return@launch
+                        }
+                        
+                        val objectHandles = ptpController.getObjectHandles(storageId)
+                        if (objectHandles != null) {
+                            Log.d(TAG, "[$timestamp] Returning ${objectHandles.size} object handles to Flutter from USB")
+                            result.success(objectHandles)
+                        } else {
+                            Log.e(TAG, "[$timestamp] Failed to get object handles from USB")
+                            result.error("PTP_ERROR", "Failed to get object handles", null)
+                        }
+                    }
+                    ConnectionType.WIFI -> {
+                        val objectHandles = ptpIpController.getObjectHandles(storageId)
+                        if (objectHandles != null) {
+                            Log.d(TAG, "[$timestamp] Returning ${objectHandles.size} object handles to Flutter from WiFi")
+                            result.success(objectHandles)
+                        } else {
+                            Log.e(TAG, "[$timestamp] Failed to get object handles from WiFi")
+                            result.error("PTP_ERROR", "Failed to get object handles", null)
+                        }
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "[$timestamp] Error getting object handles: ${e.message}")
@@ -288,19 +354,39 @@ class MainActivity : FlutterActivity() {
         
         coroutineScope.launch {
             try {
-                if (!ptpController.isConnected()) {
-                    Log.e(TAG, "[$timestamp] Camera not connected")
-                    result.error("NOT_CONNECTED", "Camera not connected", null)
-                    return@launch
-                }
-                
-                val info = ptpController.getObjectInfo(objectHandle)
-                if (info != null) {
-                    Log.d(TAG, "[$timestamp] Returning object info to Flutter")
-                    result.success(info)
-                } else {
-                    Log.e(TAG, "[$timestamp] Failed to get object info")
-                    result.error("PTP_ERROR", "Failed to get object info", null)
+                when (activeConnectionType) {
+                    ConnectionType.NONE -> {
+                        Log.e(TAG, "[$timestamp] Camera not connected")
+                        result.error("NOT_CONNECTED", "Camera not connected", null)
+                        return@launch
+                    }
+                    ConnectionType.USB -> {
+                        if (!ptpController.isConnected()) {
+                            Log.e(TAG, "[$timestamp] USB camera connection lost")
+                            activeConnectionType = ConnectionType.NONE
+                            result.error("NOT_CONNECTED", "Camera connection lost", null)
+                            return@launch
+                        }
+                        
+                        val info = ptpController.getObjectInfo(objectHandle)
+                        if (info != null) {
+                            Log.d(TAG, "[$timestamp] Returning object info to Flutter from USB")
+                            result.success(info)
+                        } else {
+                            Log.e(TAG, "[$timestamp] Failed to get object info from USB")
+                            result.error("PTP_ERROR", "Failed to get object info", null)
+                        }
+                    }
+                    ConnectionType.WIFI -> {
+                        val info = ptpIpController.getObjectInfo(objectHandle)
+                        if (info != null) {
+                            Log.d(TAG, "[$timestamp] Returning object info to Flutter from WiFi")
+                            result.success(info)
+                        } else {
+                            Log.e(TAG, "[$timestamp] Failed to get object info from WiFi")
+                            result.error("PTP_ERROR", "Failed to get object info", null)
+                        }
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "[$timestamp] Error getting object info: ${e.message}")
@@ -315,19 +401,39 @@ class MainActivity : FlutterActivity() {
         
         coroutineScope.launch {
             try {
-                if (!ptpController.isConnected()) {
-                    Log.e(TAG, "[$timestamp] Camera not connected")
-                    result.error("NOT_CONNECTED", "Camera not connected", null)
-                    return@launch
-                }
-                
-                val data = ptpController.getObject(objectHandle)
-                if (data != null) {
-                    Log.d(TAG, "[$timestamp] Returning object data (${data.size} bytes) to Flutter")
-                    result.success(data)
-                } else {
-                    Log.e(TAG, "[$timestamp] Failed to download object")
-                    result.error("PTP_ERROR", "Failed to download object", null)
+                when (activeConnectionType) {
+                    ConnectionType.NONE -> {
+                        Log.e(TAG, "[$timestamp] Camera not connected")
+                        result.error("NOT_CONNECTED", "Camera not connected", null)
+                        return@launch
+                    }
+                    ConnectionType.USB -> {
+                        if (!ptpController.isConnected()) {
+                            Log.e(TAG, "[$timestamp] USB camera connection lost")
+                            activeConnectionType = ConnectionType.NONE
+                            result.error("NOT_CONNECTED", "Camera connection lost", null)
+                            return@launch
+                        }
+                        
+                        val data = ptpController.getObject(objectHandle)
+                        if (data != null) {
+                            Log.d(TAG, "[$timestamp] Returning object data (${data.size} bytes) to Flutter from USB")
+                            result.success(data)
+                        } else {
+                            Log.e(TAG, "[$timestamp] Failed to download object from USB")
+                            result.error("PTP_ERROR", "Failed to download object", null)
+                        }
+                    }
+                    ConnectionType.WIFI -> {
+                        val data = ptpIpController.getObject(objectHandle)
+                        if (data != null) {
+                            Log.d(TAG, "[$timestamp] Returning object data (${data.size} bytes) to Flutter from WiFi")
+                            result.success(data)
+                        } else {
+                            Log.e(TAG, "[$timestamp] Failed to download object from WiFi")
+                            result.error("PTP_ERROR", "Failed to download object", null)
+                        }
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "[$timestamp] Error downloading object: ${e.message}")
@@ -341,23 +447,157 @@ class MainActivity : FlutterActivity() {
         val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
         Log.d(TAG, "[$timestamp] Activity resumed, checking for camera connection")
         
-        // Check if we have a camera that needs setup
-        if (!ptpController.isConnected()) {
+        // Check if we have a USB camera that needs setup, but only if we're not already connected via WiFi
+        if (activeConnectionType != ConnectionType.WIFI && !ptpController.isConnected()) {
             val canonDevice = usbManager?.deviceList?.values?.find { device ->
                 device.vendorId == 0x04a9 // Canon vendor ID
             }
             
-            if (canonDevice != null && usbManager?.hasPermission(canonDevice) == true) {
-                Log.i(TAG, "[$timestamp] Found Canon camera with permission in onResume, setting up")
-                ptpController.setupDevice(canonDevice)
+                if (canonDevice != null && usbManager?.hasPermission(canonDevice) == true) {
+                    Log.i(TAG, "[$timestamp] Found Canon camera with permission in onResume, setting up")
+                    val success = ptpController.setupDevice(canonDevice)
+                    if (success) {
+                        activeConnectionType = ConnectionType.USB
+                        Log.i(TAG, "[$timestamp] USB connection established in onResume")
+                        setupNewPhotoListener()
+                    }
+                }
             }
         }
     }
     
+    /**
+     * Setup listener for new photos taken on the camera
+     */
+    private fun setupNewPhotoListener() {
+        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+        
+        when (activeConnectionType) {
+            ConnectionType.USB -> {
+                Log.i(TAG, "[$timestamp] Setting up new photo listener for USB camera")
+                ptpController.setNewObjectListener { objectHandle ->
+                    // This will be called when a new photo is detected on the camera
+                    Log.i(TAG, "[$timestamp] New photo detected on camera! Object handle: 0x${objectHandle.toString(16)}")
+                    
+                    // You can auto-download the new photo here if desired
+                    coroutineScope.launch {
+                        try {
+                            val info = ptpController.getObjectInfo(objectHandle)
+                            if (info != null) {
+                                Log.i(TAG, "[$timestamp] New photo info: $info")
+                                
+                                // Optional: Notify Flutter about the new photo
+                                runOnUiThread {
+                                    val event = mapOf(
+                                        "event" to "new_photo",
+                                        "objectHandle" to objectHandle,
+                                        "info" to info
+                                    )
+                                    MethodChannel(flutterEngine?.dartExecutor?.binaryMessenger, CHANNEL)
+                                        .invokeMethod("onCameraEvent", event)
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "[$timestamp] Error processing new photo: ${e.message}")
+                        }
+                    }
+                }
+            }
+            ConnectionType.WIFI -> {
+                Log.i(TAG, "[$timestamp] Setting up new photo listener for WiFi camera")
+                // Similar implementation for PTP/IP would be added here
+            }
+            else -> {
+                Log.i(TAG, "[$timestamp] No camera connected, not setting up photo listener")
+            }
+        }
+    }    private fun connectToWifiCamera(ipAddress: String, port: Int, result: MethodChannel.Result) {
+        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+        Log.d(TAG, "[$timestamp] Flutter requested WiFi camera connection to $ipAddress:$port")
+        
+        if (activeConnectionType != ConnectionType.NONE && activeConnectionType != ConnectionType.WIFI) {
+            // If already connected via USB, disconnect first
+            if (activeConnectionType == ConnectionType.USB) {
+                ptpController.release()
+            }
+        }
+        
+        // Setup timeout job
+        val timeoutJob = coroutineScope.launch {
+            delay(20000) // 20 seconds timeout
+            if (isActive) {
+                Log.e(TAG, "[$timestamp] WiFi camera connection timed out after 20 seconds")
+                result.error("TIMEOUT", "WiFi camera connection timed out", null)
+            }
+        }
+        
+        coroutineScope.launch {
+            try {
+                val connected = ptpIpController.connect(ipAddress, port)
+                timeoutJob.cancel() // Cancel timeout job
+                
+                if (connected) {
+                    Log.i(TAG, "[$timestamp] Successfully connected to camera via WiFi")
+                    activeConnectionType = ConnectionType.WIFI
+                    result.success(mapOf(
+                        "connected" to true,
+                        "message" to "Camera connected successfully via WiFi",
+                        "connectionType" to "WIFI"
+                    ))
+                } else {
+                    Log.e(TAG, "[$timestamp] Failed to connect to camera via WiFi")
+                    activeConnectionType = ConnectionType.NONE
+                    result.error("CONNECTION_ERROR", "Failed to connect to camera via WiFi", null)
+                }
+            } catch (e: Exception) {
+                timeoutJob.cancel() // Cancel timeout job
+                Log.e(TAG, "[$timestamp] Error connecting to WiFi camera: ${e.message}")
+                activeConnectionType = ConnectionType.NONE
+                result.error("CONNECTION_ERROR", "Error connecting to WiFi camera: ${e.message}", null)
+            }
+        }
+    }
+    
+    private fun disconnectCamera(result: MethodChannel.Result) {
+        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+        Log.d(TAG, "[$timestamp] Flutter requested camera disconnection")
+        
+        try {
+            when (activeConnectionType) {
+                ConnectionType.USB -> {
+                    ptpController.release()
+                    Log.i(TAG, "[$timestamp] USB camera disconnected")
+                }
+                ConnectionType.WIFI -> {
+                    ptpIpController.closeConnection()
+                    Log.i(TAG, "[$timestamp] WiFi camera disconnected")
+                }
+                else -> {
+                    Log.i(TAG, "[$timestamp] No camera connected to disconnect")
+                }
+            }
+            
+            activeConnectionType = ConnectionType.NONE
+            result.success(mapOf(
+                "success" to true,
+                "message" to "Camera disconnected successfully"
+            ))
+        } catch (e: Exception) {
+            Log.e(TAG, "[$timestamp] Error disconnecting camera: ${e.message}")
+            result.error("DISCONNECT_ERROR", "Error disconnecting camera: ${e.message}", null)
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         coroutineScope.cancel()
         unregisterReceiver(usbReceiver)
-        ptpController.release()
+        
+        // Release resources based on connection type
+        when (activeConnectionType) {
+            ConnectionType.USB -> ptpController.release()
+            ConnectionType.WIFI -> ptpIpController.closeConnection()
+            else -> {} // No connection to close
+        }
     }
 }

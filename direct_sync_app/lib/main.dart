@@ -52,6 +52,8 @@ class _HomeMenuScreenState extends State<HomeMenuScreen>
     _checkCameraConnection();
     // Start periodic connection checks
     _startConnectionMonitoring();
+    // Setup camera event listener
+    _setupEventListener();
   }
 
   @override
@@ -84,13 +86,99 @@ class _HomeMenuScreenState extends State<HomeMenuScreen>
     _connectionCheckTimer = null;
   }
 
+  void _setupEventListener() {
+    platform.setMethodCallHandler((call) async {
+      switch (call.method) {
+        case 'onCameraEvent':
+          final Map<dynamic, dynamic> event = call.arguments;
+          if (event['event'] == 'new_photo') {
+            _handleNewPhotoEvent(event);
+          }
+          break;
+        default:
+          print('Unknown method call: ${call.method}');
+      }
+      return null;
+    });
+  }
+
+  void _handleNewPhotoEvent(Map<dynamic, dynamic> event) {
+    final int objectHandle = event['objectHandle'];
+    final Map<dynamic, dynamic>? info = event['info'];
+
+    print('New photo detected! Handle: 0x${objectHandle.toRadixString(16)}');
+    if (info != null) {
+      print('Photo info: $info');
+    }
+
+    // Show notification to user
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('New photo taken on camera!'),
+          action: SnackBarAction(
+            label: 'View',
+            onPressed: () {
+              // Navigate to photo viewer or refresh storage browser
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (context) => const StorageBrowserScreen(),
+                ),
+              );
+            },
+          ),
+          duration: const Duration(seconds: 5),
+        ),
+      );
+    }
+  }
+
+  Future<void> _connectToWifiCamera(
+    String ipAddress, {
+    int port = 15740,
+  }) async {
+    setState(() {
+      _isChecking = true;
+      _connectionStatus = 'Connecting to camera via WiFi...';
+    });
+
+    try {
+      final result = await platform.invokeMethod('connectToWifiCamera', {
+        'ipAddress': ipAddress,
+        'port': port,
+      });
+
+      setState(() {
+        _isConnected = result['connected'] ?? false;
+        _connectionStatus = result['message'] ?? 'Unknown connection status';
+        _isChecking = false;
+      });
+
+      if (_isConnected) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Camera connected via WiFi')),
+        );
+      }
+    } catch (e) {
+      setState(() {
+        _isConnected = false;
+        _connectionStatus = 'Failed to connect: ${e.toString()}';
+        _isChecking = false;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Connection error: ${e.toString()}')),
+      );
+    }
+  }
+
   Future<void> _checkCameraConnection() async {
     setState(() {
       _isChecking = true;
     });
 
     try {
-      // The result could now be a boolean or a Map based on our native code changes
+      // Try USB connection first
       final result = await platform.invokeMethod('initializeCamera');
 
       // Handle different response types
@@ -240,6 +328,66 @@ class _HomeMenuScreenState extends State<HomeMenuScreen>
     }
   }
 
+  void _showWifiConnectionDialog() {
+    final ipAddressController = TextEditingController();
+    final portController = TextEditingController(text: '15740');
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Connect to WiFi Camera'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: ipAddressController,
+                decoration: const InputDecoration(
+                  labelText: 'Camera IP Address',
+                  hintText: 'e.g., 192.168.1.100',
+                ),
+                keyboardType: TextInputType.text,
+              ),
+              TextField(
+                controller: portController,
+                decoration: const InputDecoration(
+                  labelText: 'Port (default: 15740)',
+                ),
+                keyboardType: TextInputType.number,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+              },
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () {
+                final ipAddress = ipAddressController.text.trim();
+                final port = int.tryParse(portController.text.trim()) ?? 15740;
+
+                if (ipAddress.isNotEmpty) {
+                  Navigator.of(context).pop();
+                  _connectToWifiCamera(ipAddress, port: port);
+                } else {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Please enter a valid IP address'),
+                    ),
+                  );
+                }
+              },
+              child: const Text('Connect'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -333,11 +481,22 @@ class _HomeMenuScreenState extends State<HomeMenuScreen>
                     ],
                   ),
                   const SizedBox(height: 8),
-                  ElevatedButton(
-                    onPressed: _isChecking ? null : _checkCameraConnection,
-                    child: Text(
-                      _isChecking ? 'Checking...' : 'Refresh Connection',
-                    ),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      ElevatedButton(
+                        onPressed: _isChecking ? null : _checkCameraConnection,
+                        child: Text(
+                          _isChecking ? 'Checking...' : 'USB Connection',
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      ElevatedButton(
+                        onPressed:
+                            _isChecking ? null : _showWifiConnectionDialog,
+                        child: const Text('WiFi Connection'),
+                      ),
+                    ],
                   ),
                 ],
               ),

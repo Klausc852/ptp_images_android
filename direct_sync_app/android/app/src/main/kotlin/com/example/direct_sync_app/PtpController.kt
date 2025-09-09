@@ -18,11 +18,19 @@ class PtpController(private val context: Context) {
         private const val TAG = "PtpController"
         
         // PTP Operation Codes
+        const val PTP_OPERATION_GET_DEVICE_INFO = 0x1001
+        const val PTP_OPERATION_OPEN_SESSION = 0x1002
+        const val PTP_OPERATION_CLOSE_SESSION = 0x1003
         const val PTP_OPERATION_GET_STORAGE_IDS = 0x1004
         const val PTP_OPERATION_GET_STORAGE_INFO = 0x1005
         const val PTP_OPERATION_GET_OBJECT_HANDLES = 0x1007
         const val PTP_OPERATION_GET_OBJECT_INFO = 0x1008
         const val PTP_OPERATION_GET_OBJECT = 0x1009
+        
+        // PTP Event Codes
+        const val PTP_EVENT_OBJECT_ADDED = 0x4002
+        const val PTP_EVENT_DEVICE_PROP_CHANGED = 0x4006
+        const val PTP_EVENT_OBJECT_INFO_CHANGED = 0x4007
     }
     
     // USB connection components
@@ -32,6 +40,16 @@ class PtpController(private val context: Context) {
     private var usbInterface: UsbInterface? = null
     private var endpointIn: UsbEndpoint? = null
     private var endpointOut: UsbEndpoint? = null
+    private var endpointEvent: UsbEndpoint? = null
+    
+    // Session management
+    private var sessionId: Int = 1
+    private var transactionId: Int = 0
+    private var sessionOpen: Boolean = false
+    
+    // New object listener
+    private var newObjectListener: ((Int) -> Unit)? = null
+    private var eventListenerJob: Job? = null
     
     // Coroutine scope for async operations
     private val coroutineScope = CoroutineScope(Dispatchers.IO + Job())
@@ -109,16 +127,30 @@ class PtpController(private val context: Context) {
                     endpointOut = endpoint
                     logMessage("Found OUT endpoint: ${endpoint.endpointNumber}")
                 }
+            } else if (endpoint?.type == UsbConstants.USB_ENDPOINT_XFER_INT && endpoint.direction == UsbConstants.USB_DIR_IN) {
+                // Interrupt endpoint is typically used for events
+                endpointEvent = endpoint
+                logMessage("Found EVENT endpoint: ${endpoint.endpointNumber}")
             }
         }
         
         if (endpointIn == null || endpointOut == null) {
             logError("Failed to find required endpoints")
             return false
-        } else {
-            logMessage("Camera setup completed successfully")
-            return true
         }
+        
+        logMessage("Basic camera setup completed, opening PTP session...")
+        
+        // Open a PTP session
+        val sessionSuccess = coroutineScope.async { openSession() }.runBlocking()
+        
+        if (!sessionSuccess) {
+            logError("Failed to open PTP session")
+            return false
+        }
+        
+        logMessage("Camera setup completed successfully")
+        return true
     }
     
     /**
@@ -377,11 +409,206 @@ class PtpController(private val context: Context) {
     }
     
     /**
+     * Open a PTP session with the camera
+     * @return Boolean indicating if session was opened successfully
+     */
+    suspend fun openSession(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            logMessage("Opening PTP session with ID $sessionId...")
+            val command = ByteBuffer.allocate(16)
+            command.order(ByteOrder.LITTLE_ENDIAN)
+            command.putInt(16) // Length
+            command.putShort(1) // Type (command block)
+            command.putShort(PTP_OPERATION_OPEN_SESSION.toShort()) // Operation code
+            command.putInt(++transactionId) // Transaction ID
+            command.putInt(sessionId) // Session ID parameter
+            
+            val sent = sendPtpCommand(command.array())
+            if (sent < 0) {
+                logError("Failed to send OpenSession command")
+                return@withContext false
+            }
+            
+            // Get response (should be a "OK" response code 0x2001)
+            val response = ByteArray(12) // Response is usually 12 bytes
+            val responseLength = usbDeviceConnection?.bulkTransfer(endpointIn, response, response.size, 5000) ?: -1
+            
+            if (responseLength >= 12) {
+                val responseCode = ByteBuffer.wrap(response, 6, 2).order(ByteOrder.LITTLE_ENDIAN).short.toInt() and 0xFFFF
+                if (responseCode == 0x2001) { // OK response
+                    logMessage("Session opened successfully")
+                    sessionOpen = true
+                    return@withContext true
+                } else {
+                    logError("Failed to open session: response code 0x${responseCode.toString(16)}")
+                }
+            } else {
+                logError("Invalid response when opening session")
+            }
+            
+            return@withContext false
+        } catch (e: Exception) {
+            logError("Error opening PTP session: ${e.message}")
+            e.printStackTrace()
+            return@withContext false
+        }
+    }
+    
+    /**
+     * Close the PTP session
+     * @return Boolean indicating if session was closed successfully
+     */
+    suspend fun closeSession(): Boolean = withContext(Dispatchers.IO) {
+        if (!sessionOpen) {
+            logMessage("No active session to close")
+            return@withContext true
+        }
+        
+        try {
+            logMessage("Closing PTP session...")
+            val command = ByteBuffer.allocate(12)
+            command.order(ByteOrder.LITTLE_ENDIAN)
+            command.putInt(12) // Length
+            command.putShort(1) // Type (command block)
+            command.putShort(PTP_OPERATION_CLOSE_SESSION.toShort()) // Operation code
+            command.putInt(++transactionId) // Transaction ID
+            
+            val sent = sendPtpCommand(command.array())
+            if (sent < 0) {
+                logError("Failed to send CloseSession command")
+                return@withContext false
+            }
+            
+            // Get response
+            val response = ByteArray(12)
+            val responseLength = usbDeviceConnection?.bulkTransfer(endpointIn, response, response.size, 5000) ?: -1
+            
+            sessionOpen = false
+            stopEventListener()
+            
+            if (responseLength >= 12) {
+                val responseCode = ByteBuffer.wrap(response, 6, 2).order(ByteOrder.LITTLE_ENDIAN).short.toInt() and 0xFFFF
+                if (responseCode == 0x2001) { // OK response
+                    logMessage("Session closed successfully")
+                    return@withContext true
+                } else {
+                    logError("Failed to close session: response code 0x${responseCode.toString(16)}")
+                }
+            } else {
+                logError("Invalid response when closing session")
+            }
+            
+            return@withContext false
+        } catch (e: Exception) {
+            logError("Error closing PTP session: ${e.message}")
+            e.printStackTrace()
+            sessionOpen = false
+            return@withContext false
+        }
+    }
+    
+    /**
+     * Set a listener to be notified when a new object is added to the camera
+     * @param listener A function that will be called with the object handle when a new object is detected
+     */
+    fun setNewObjectListener(listener: (Int) -> Unit) {
+        newObjectListener = listener
+        if (isConnected() && endpointEvent != null && eventListenerJob == null) {
+            startEventListener()
+        }
+    }
+    
+    /**
+     * Start listening for PTP events from the camera
+     */
+    private fun startEventListener() {
+        if (endpointEvent == null) {
+            logError("No event endpoint available, cannot listen for events")
+            return
+        }
+        
+        logMessage("Starting event listener...")
+        eventListenerJob = coroutineScope.launch {
+            val eventBuffer = ByteArray(64) // Events are usually small
+            
+            while (isActive && isConnected()) {
+                try {
+                    val length = usbDeviceConnection?.bulkTransfer(
+                        endpointEvent, eventBuffer, eventBuffer.size, 500)
+                    
+                    if (length != null && length > 12) { // Valid event should be at least 12 bytes
+                        val eventCode = ByteBuffer.wrap(eventBuffer, 6, 2)
+                            .order(ByteOrder.LITTLE_ENDIAN).short.toInt() and 0xFFFF
+                        
+                        when (eventCode) {
+                            PTP_EVENT_OBJECT_ADDED -> {
+                                val objectHandle = ByteBuffer.wrap(eventBuffer, 8, 4)
+                                    .order(ByteOrder.LITTLE_ENDIAN).int
+                                logMessage("New object added! Handle: 0x${objectHandle.toString(16)}")
+                                newObjectListener?.invoke(objectHandle)
+                            }
+                            PTP_EVENT_DEVICE_PROP_CHANGED -> {
+                                logMessage("Device property changed event")
+                            }
+                            PTP_EVENT_OBJECT_INFO_CHANGED -> {
+                                logMessage("Object info changed event")
+                            }
+                            else -> {
+                                if (eventCode != 0) {
+                                    logMessage("Received event code: 0x${eventCode.toString(16)}")
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Small delay to prevent high CPU usage
+                    delay(100)
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    logError("Error in event listener: ${e.message}")
+                    delay(1000) // Longer delay after error
+                }
+            }
+        }
+    }
+    
+    /**
+     * Stop listening for PTP events
+     */
+    private fun stopEventListener() {
+        eventListenerJob?.cancel()
+        eventListenerJob = null
+        logMessage("Event listener stopped")
+    }
+    
+    /**
      * Clean up resources
      */
     fun release() {
         logMessage("Releasing PTP controller resources")
-        coroutineScope.cancel()
+        
+        // Cancel all coroutines
+        coroutineScope.launch {
+            // Try to properly close the session first
+            if (sessionOpen) {
+                try {
+                    closeSession()
+                } catch (e: Exception) {
+                    logError("Error during session close: ${e.message}")
+                }
+            }
+            
+            // Stop the event listener
+            stopEventListener()
+        }
+        
+        // Cancel the entire scope after a short delay to allow cleanup
+        coroutineScope.launch {
+            delay(500)
+            coroutineScope.cancel()
+        }
+        
+        // Release USB resources
         usbDeviceConnection?.releaseInterface(usbInterface)
         usbDeviceConnection?.close()
         usbDevice = null
@@ -389,6 +616,11 @@ class PtpController(private val context: Context) {
         usbInterface = null
         endpointIn = null
         endpointOut = null
+        endpointEvent = null
+        
+        // Reset session state
+        sessionOpen = false
+        transactionId = 0
     }
     
     /**
