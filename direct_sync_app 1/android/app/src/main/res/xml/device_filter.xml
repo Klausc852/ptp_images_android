@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- PTP/MTP Camera Device Filter -->
+    <!-- This filter matches devices with Still Image class (0x06) -->
+    <usb-device
+        class="6"
+        subclass="1"
+        protocol="1" />
+
+    <!-- Canon specific VID/PID (example - adjust for your camera) -->
+    <!-- Canon EOS R -->
+    <usb-device vendor-id="1193" product-id="13043" />
+    <!-- Canon EOS R5 -->
+    <usb-device vendor-id="1193" product-id="12563" />
+
+    <!-- Canon EOS R6 -->
+    <usb-device vendor-id="1193" product-id="12595" />
+
+    <!-- Generic PTP/MTP devices -->
+    <usb-device
+        vendor-id="1193"
+        class="6"
+        subclass="1" />
+
+    <!-- Nikon cameras -->
+    <usb-device vendor-id="1200" />
+
+    <!-- Sony cameras -->
+    <usb-device vendor-id="1356" />
+
+    <!-- Panasonic cameras -->
+    <usb-device vendor-id="1689" />
+
+    <!-- Olympus cameras -->
+    <usb-device vendor-id="1701" />
+
+    <!-- Fujifilm cameras -->
+    <usb-device vendor-id="1227" />
+
+    <!-- Generic fallback for any PTP/MTP device -->
+    <usb-device class="6" />
+</resources>
