@@ -36,6 +36,20 @@ dependencies:
   cupertino_icons: ^1.0.8
   flutter_spinkit: ^5.2.2
   path_provider: ^2.1.5
+  photo_manager: ^3.0.0-dev.2
+  shared_preferences: ^2.2.3
+  
+  # AWS Amplify packages
+  amplify_flutter: ^2.0.0
+  amplify_storage_s3: ^2.0.0
+  amplify_auth_cognito: ^2.6.2
+   
+  flutter_dotenv: ^5.0.2
+  
+  # Background processing
+  # background_fetch: ^1.2.1  # Has licensing issues with the Android SDK
+  # workmanager: ^0.5.2       # Alternative background processing solution
+  # flutter_local_notifications: ^16.3.2  # For notifications
 
 dev_dependencies:
   flutter_test:
@@ -60,7 +74,9 @@ flutter:
   uses-material-design: true
 
   # To add assets to your application, add an assets section, like this:
-  # assets:
+  assets:
+    - assets/.env.dev
+    - assets/.env.prod
   #   - images/a_dot_burr.jpeg
   #   - images/a_dot_ham.jpeg
 

@@ -1,16 +1,17 @@
-import 'dart:io';
-import 'dart:typed_data';
-import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:path_provider/path_provider.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'photo_list_screen.dart';
-import 'storage_browser_screen.dart';
+import 'camera_connection_screen.dart';
+import 's3_sync_screen.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-// Define the method channel for native communication
-const platform = MethodChannel('com.example.direct_sync_app/camera');
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
 
-void main() {
+  // Load the appropriate environment file
+  // You can change this to .env.prod for production
+  await dotenv.load(fileName: "assets/.env.dev");
+
   runApp(const MyApp());
 }
 
@@ -38,494 +39,232 @@ class HomeMenuScreen extends StatefulWidget {
   State<HomeMenuScreen> createState() => _HomeMenuScreenState();
 }
 
-class _HomeMenuScreenState extends State<HomeMenuScreen>
-    with WidgetsBindingObserver {
-  bool _isConnected = false;
-  bool _isChecking = false;
-  String _connectionStatus = 'Camera not connected';
-  Timer? _connectionCheckTimer;
+class _HomeMenuScreenState extends State<HomeMenuScreen> {
+  final String username =
+      "User"; // You can replace this with actual user's name if available
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    _checkCameraConnection();
-    // Start periodic connection checks
-    _startConnectionMonitoring();
-    // Setup camera event listener
-    _setupEventListener();
+
+    // Initialize the app
+    _initializeApp();
   }
 
-  @override
-  void dispose() {
-    _stopConnectionMonitoring();
-    WidgetsBinding.instance.removeObserver(this);
-    super.dispose();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    // When app comes back to foreground, check connection status
-    if (state == AppLifecycleState.resumed) {
-      _checkCameraConnection();
-    }
-  }
-
-  void _startConnectionMonitoring() {
-    // Check connection status every 5 seconds
-    _connectionCheckTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
-      // Only perform check if we're not already checking and if the widget is still mounted
-      if (!_isChecking && mounted) {
-        _checkConnectionSilently();
-      }
-    });
-  }
-
-  void _stopConnectionMonitoring() {
-    _connectionCheckTimer?.cancel();
-    _connectionCheckTimer = null;
-  }
-
-  void _setupEventListener() {
-    platform.setMethodCallHandler((call) async {
-      switch (call.method) {
-        case 'onCameraEvent':
-          final Map<dynamic, dynamic> event = call.arguments;
-          if (event['event'] == 'new_photo') {
-            _handleNewPhotoEvent(event);
-          }
-          break;
-        default:
-          print('Unknown method call: ${call.method}');
-      }
-      return null;
-    });
-  }
-
-  void _handleNewPhotoEvent(Map<dynamic, dynamic> event) {
-    final int objectHandle = event['objectHandle'];
-    final Map<dynamic, dynamic>? info = event['info'];
-
-    print('New photo detected! Handle: 0x${objectHandle.toRadixString(16)}');
-    if (info != null) {
-      print('Photo info: $info');
-    }
-
-    // Show notification to user
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('New photo taken on camera!'),
-          action: SnackBarAction(
-            label: 'View',
-            onPressed: () {
-              // Navigate to photo viewer or refresh storage browser
-              Navigator.of(context).push(
-                MaterialPageRoute(
-                  builder: (context) => const StorageBrowserScreen(),
-                ),
-              );
-            },
-          ),
-          duration: const Duration(seconds: 5),
-        ),
-      );
-    }
-  }
-
-  Future<void> _connectToWifiCamera(
-    String ipAddress, {
-    int port = 15740,
-  }) async {
-    setState(() {
-      _isChecking = true;
-      _connectionStatus = 'Connecting to camera via WiFi...';
-    });
-
+  // Initialize app
+  Future<void> _initializeApp() async {
+    // Check auto-sync preference for UI state
     try {
-      final result = await platform.invokeMethod('connectToWifiCamera', {
-        'ipAddress': ipAddress,
-        'port': port,
-      });
+      SharedPreferences prefs = await SharedPreferences.getInstance();
+      bool autoSyncEnabled = prefs.getBool('auto_sync_enabled') ?? false;
 
-      setState(() {
-        _isConnected = result['connected'] ?? false;
-        _connectionStatus = result['message'] ?? 'Unknown connection status';
-        _isChecking = false;
-      });
+      if (autoSyncEnabled) {
+        print('Auto-sync is enabled in preferences');
 
-      if (_isConnected) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Camera connected via WiFi')),
-        );
+        // Note: Background sync functionality is currently disabled
+        // Future implementation will use a different background processing solution
       }
     } catch (e) {
-      setState(() {
-        _isConnected = false;
-        _connectionStatus = 'Failed to connect: ${e.toString()}';
-        _isChecking = false;
-      });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Connection error: ${e.toString()}')),
-      );
+      print('Error loading preferences: $e');
     }
-  }
-
-  Future<void> _checkCameraConnection() async {
-    setState(() {
-      _isChecking = true;
-    });
-
-    try {
-      // Try USB connection first
-      final result = await platform.invokeMethod('initializeCamera');
-
-      // Handle different response types
-      if (result is bool) {
-        // Handle legacy boolean response
-        setState(() {
-          _isConnected = result;
-          _connectionStatus =
-              result ? 'Camera connected' : 'Camera not connected';
-          _isChecking = false;
-        });
-      } else if (result is Map) {
-        // Handle the new map response format
-        final bool connected = result['connected'] as bool? ?? false;
-        final String? message = result['message'] as String?;
-        final String? status = result['status'] as String?;
-
-        setState(() {
-          _isConnected = connected;
-          _connectionStatus =
-              message ??
-              (connected ? 'Camera connected' : 'Camera not connected');
-
-          // Only stop checking if we're fully connected or have a definitive error
-          // If we're just waiting for permission, keep the checking state
-          if (connected || status != 'PERMISSION_REQUESTED') {
-            _isChecking = false;
-          }
-        });
-
-        // If we're waiting for permission, poll for connection status after a delay
-        if (status == 'PERMISSION_REQUESTED') {
-          await Future.delayed(const Duration(seconds: 2));
-          if (mounted) {
-            _pollConnectionStatus();
-          }
-        }
-      } else {
-        // Handle unexpected response type
-        setState(() {
-          _isConnected = false;
-          _connectionStatus = 'Error: Unexpected response format';
-          _isChecking = false;
-        });
-      }
-    } on PlatformException catch (e) {
-      setState(() {
-        _isConnected = false;
-        _connectionStatus = 'Error: ${e.message}';
-        _isChecking = false;
-      });
-    } catch (e) {
-      setState(() {
-        _isConnected = false;
-        _connectionStatus = 'Unknown error occurred';
-        _isChecking = false;
-      });
-    }
-  }
-
-  // Poll for connection status after permission request
-  Future<void> _pollConnectionStatus() async {
-    try {
-      final result = await platform.invokeMethod('initializeCamera');
-
-      if (result is Map) {
-        final bool connected = result['connected'] as bool? ?? false;
-        final String? message = result['message'] as String?;
-
-        setState(() {
-          _isConnected = connected;
-          _connectionStatus =
-              message ??
-              (connected ? 'Camera connected' : 'Camera not connected');
-          _isChecking = false;
-        });
-      } else if (result is bool) {
-        setState(() {
-          _isConnected = result;
-          _connectionStatus =
-              result ? 'Camera connected' : 'Camera not connected';
-          _isChecking = false;
-        });
-      }
-    } catch (e) {
-      // If polling fails, just stop checking
-      setState(() {
-        _isChecking = false;
-      });
-    }
-  }
-
-  // Check connection status without showing loading indicators
-  Future<void> _checkConnectionSilently() async {
-    // Don't set _isChecking to true to avoid UI changes
-    bool wasConnected = _isConnected;
-
-    try {
-      final result = await platform.invokeMethod('initializeCamera');
-      bool nowConnected = false;
-      String statusMessage = '';
-
-      if (result is bool) {
-        nowConnected = result;
-        statusMessage = result ? 'Camera connected' : 'Camera not connected';
-      } else if (result is Map) {
-        nowConnected = result['connected'] as bool? ?? false;
-        statusMessage =
-            result['message'] as String? ??
-            (nowConnected ? 'Camera connected' : 'Camera not connected');
-      }
-
-      // Only update state if connection status changed
-      if (wasConnected != nowConnected) {
-        setState(() {
-          _isConnected = nowConnected;
-          _connectionStatus = statusMessage;
-
-          // If connection was lost, show notification
-          if (wasConnected && !nowConnected) {
-            _showConnectionLostNotification();
-          }
-        });
-      }
-    } catch (e) {
-      // Only update if we were previously connected and now have an error
-      if (wasConnected) {
-        setState(() {
-          _isConnected = false;
-          _connectionStatus = 'Connection lost: ${e.toString()}';
-        });
-        _showConnectionLostNotification();
-      }
-    }
-  }
-
-  // Show notification when connection is lost
-  void _showConnectionLostNotification() {
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Camera connection lost!'),
-          backgroundColor: Colors.red,
-          duration: Duration(seconds: 3),
-        ),
-      );
-    }
-  }
-
-  void _showWifiConnectionDialog() {
-    final ipAddressController = TextEditingController();
-    final portController = TextEditingController(text: '15740');
-
-    showDialog(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('Connect to WiFi Camera'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: ipAddressController,
-                decoration: const InputDecoration(
-                  labelText: 'Camera IP Address',
-                  hintText: 'e.g., 192.168.1.100',
-                ),
-                keyboardType: TextInputType.text,
-              ),
-              TextField(
-                controller: portController,
-                decoration: const InputDecoration(
-                  labelText: 'Port (default: 15740)',
-                ),
-                keyboardType: TextInputType.number,
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-              },
-              child: const Text('Cancel'),
-            ),
-            TextButton(
-              onPressed: () {
-                final ipAddress = ipAddressController.text.trim();
-                final port = int.tryParse(portController.text.trim()) ?? 15740;
-
-                if (ipAddress.isNotEmpty) {
-                  Navigator.of(context).pop();
-                  _connectToWifiCamera(ipAddress, port: port);
-                } else {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Please enter a valid IP address'),
-                    ),
-                  );
-                }
-              },
-              child: const Text('Connect'),
-            ),
-          ],
-        );
-      },
-    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Direct Sync App'),
-        actions: [
-          // Connection status indicator
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: Row(
+      appBar: AppBar(title: const Text('Direct Sync App'), elevation: 2),
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Colors.blue.shade50, Colors.white],
+          ),
+        ),
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 300),
-                  child: Icon(
-                    _isConnected ? Icons.camera_alt : Icons.camera_alt_outlined,
-                    key: ValueKey<bool>(_isConnected),
-                    color: _isConnected ? Colors.green : Colors.red,
+                // Greeting section
+                Container(
+                  padding: const EdgeInsets.all(24),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(16),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.1),
+                        blurRadius: 10,
+                        offset: const Offset(0, 4),
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    children: [
+                      // App icon or logo
+                      Container(
+                        width: 80,
+                        height: 80,
+                        decoration: BoxDecoration(
+                          color: Colors.deepPurple.shade100,
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(
+                          Icons.camera,
+                          size: 40,
+                          color: Colors.deepPurple.shade700,
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                      // Greeting text
+                      Text(
+                        'Welcome, $username!',
+                        style: const TextStyle(
+                          fontSize: 28,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'What would you like to do today?',
+                        style: TextStyle(
+                          fontSize: 16,
+                          color: Colors.grey.shade700,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(width: 4),
-                AnimatedOpacity(
-                  opacity: _isChecking ? 1.0 : 0.0,
-                  duration: const Duration(milliseconds: 200),
-                  child: const SizedBox(
-                    width: 12,
-                    height: 12,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+
+                const SizedBox(height: 40),
+
+                // Main action buttons
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    // Connect Camera Button
+                    Expanded(
+                      child: _buildActionButton(
+                        context,
+                        title: 'Connect Camera',
+                        icon: Icons.camera_alt,
+                        color: Colors.blue.shade700,
+                        onTap: () {
+                          Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder:
+                                  (context) => const CameraConnectionScreen(),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 20),
+                    // Sync to S3 Button
+                    Expanded(
+                      child: _buildActionButton(
+                        context,
+                        title: 'Sync to S3',
+                        icon: Icons.cloud_upload,
+                        color: Colors.green.shade700,
+                        onTap: () {
+                          // Navigate to S3 sync screen
+                          Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (context) => const S3SyncScreen(),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+
+                const SizedBox(height: 24),
+
+                // View Photos Button
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                    icon: const Icon(Icons.photo_library),
+                    label: const Text(
+                      'View Downloaded Photos',
+                      style: TextStyle(fontSize: 16),
+                    ),
+                    onPressed: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (context) => const PhotoListScreen(),
+                        ),
+                      );
+                    },
                   ),
                 ),
               ],
             ),
           ),
-        ],
+        ),
       ),
-      body: Center(
+    );
+  }
+
+  @override
+  void dispose() {
+    // Clean up any resources or listeners here
+    super.dispose();
+  }
+
+  Widget _buildActionButton(
+    BuildContext context, {
+    required String title,
+    required IconData icon,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 12),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: color.withOpacity(0.3)),
+          boxShadow: [
+            BoxShadow(
+              color: color.withOpacity(0.1),
+              blurRadius: 8,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // Connection status
             Container(
-              padding: const EdgeInsets.all(16),
-              margin: const EdgeInsets.only(bottom: 32),
+              padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color:
-                    _isChecking
-                        ? Colors.blue.withOpacity(0.1)
-                        : (_isConnected
-                            ? Colors.green.withOpacity(0.1)
-                            : Colors.red.withOpacity(0.1)),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(
-                  color:
-                      _isChecking
-                          ? Colors.blue
-                          : (_isConnected ? Colors.green : Colors.red),
-                  width: 1,
-                ),
+                color: color.withOpacity(0.1),
+                shape: BoxShape.circle,
               ),
-              child: Column(
-                children: [
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      _isChecking
-                          ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 3),
-                          )
-                          : Icon(
-                            _isConnected ? Icons.check_circle : Icons.error,
-                            color: _isConnected ? Colors.green : Colors.red,
-                          ),
-                      const SizedBox(width: 8),
-                      Flexible(
-                        child: Text(
-                          _connectionStatus,
-                          style: TextStyle(
-                            fontSize: 16,
-                            color:
-                                _isChecking
-                                    ? Colors.blue
-                                    : (_isConnected
-                                        ? Colors.green
-                                        : Colors.red),
-                            fontWeight: FontWeight.bold,
-                          ),
-                          textAlign: TextAlign.center,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      ElevatedButton(
-                        onPressed: _isChecking ? null : _checkCameraConnection,
-                        child: Text(
-                          _isChecking ? 'Checking...' : 'USB Connection',
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      ElevatedButton(
-                        onPressed:
-                            _isChecking ? null : _showWifiConnectionDialog,
-                        child: const Text('WiFi Connection'),
-                      ),
-                    ],
-                  ),
-                ],
+              child: Icon(icon, size: 32, color: color),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              title,
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: color,
               ),
-            ),
-            ElevatedButton.icon(
-              icon: const Icon(Icons.photo_library),
-              label: const Text('Downloaded Photos'),
-              onPressed: () {
-                Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (context) => const PhotoListScreen(),
-                  ),
-                );
-              },
-            ),
-            const SizedBox(height: 24),
-            ElevatedButton.icon(
-              icon: const Icon(Icons.sd_storage),
-              label: const Text('Camera Storage Browser'),
-              onPressed:
-                  _isConnected
-                      ? () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (context) => const StorageBrowserScreen(),
-                          ),
-                        );
-                      }
-                      : null, // Disable button when camera is not connected
+              textAlign: TextAlign.center,
             ),
           ],
         ),

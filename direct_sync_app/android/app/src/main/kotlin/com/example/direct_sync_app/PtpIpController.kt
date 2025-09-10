@@ -514,8 +514,8 @@ class PtpIpController {
             
             // Extract key information
             val storageId = buffer.getInt()
-            val objectFormat = buffer.getShort().toInt() & 0xFFFF
-            val protectionStatus = buffer.getShort().toInt() & 0xFFFF
+            val objectFormat = buffer.getShort().toInt() and 0xFFFF
+            val protectionStatus = buffer.getShort().toInt() and 0xFFFF
             val objectCompressedSize = buffer.getInt()
             
             val info = mapOf(
@@ -709,10 +709,63 @@ class PtpIpController {
     }
     
     /**
-     * Check if connected to camera
+     * Check if connected to camera (based on local state)
      */
     fun isConnected(): Boolean {
         return connected
+    }
+    
+    /**
+     * Verify camera connection by performing a simple PTP/IP operation
+     * This actually tests communication with the camera, not just the local state
+     * @return Boolean true if camera responds correctly
+     */
+    suspend fun verifyConnection(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            if (!connected || commandSocket == null || commandOutputStream == null || commandInputStream == null) {
+                logError("Cannot verify connection - sockets not properly initialized")
+                return@withContext false
+            }
+            
+            // Send a ping packet
+            logMessage("Verifying camera connection with ping...")
+            
+            val pingPacket = ByteBuffer.allocate(8)
+            pingPacket.order(ByteOrder.LITTLE_ENDIAN)
+            pingPacket.putInt(8) // Length
+            pingPacket.putInt(PTPIP_PING) // Type
+            
+            commandOutputStream?.write(pingPacket.array())
+            
+            // Try to receive pong response
+            val responseSize = try {
+                commandInputStream?.readInt() ?: 0
+            } catch (e: Exception) {
+                logError("Connection verification failed - socket read error")
+                return@withContext false
+            }
+            
+            if (responseSize < 8) {
+                logError("Connection verification failed - invalid response size")
+                return@withContext false
+            }
+            
+            val responseType = commandInputStream?.readInt() ?: 0
+            if (responseType == PTPIP_PONG) {
+                logMessage("Connection verified successfully")
+                return@withContext true
+            } else {
+                logError("Connection verification failed - unexpected response type: $responseType")
+                return@withContext false
+            }
+        } catch (e: Exception) {
+            logError("Error verifying camera connection: ${e.message}")
+            e.printStackTrace()
+            
+            // Connection failed, reset state
+            connected = false
+            return@withContext false
+        }
     }
     
     /**
@@ -736,6 +789,34 @@ class PtpIpController {
         } catch (e: Exception) {
             logError("Error closing connections: ${e.message}")
         } finally {
+            commandInputStream = null
+            commandOutputStream = null
+            commandSocket = null
+            eventInputStream = null
+            eventOutputStream = null
+            eventSocket = null
+        }
+    }
+    
+    /**
+     * Release any pending connections without trying to perform protocol cleanup
+     * This is used for emergency cleanup when initialization fails
+     */
+    fun releaseAnyPendingConnections() {
+        logMessage("Emergency release of any pending connections")
+        connected = false
+        
+        try {
+            // Force close all sockets
+            commandSocket?.close()
+            eventSocket?.close()
+            
+            logMessage("Emergency connection release completed")
+        } catch (e: Exception) {
+            logError("Error in emergency release: ${e.message}")
+            e.printStackTrace()
+        } finally {
+            // Reset all connection variables
             commandInputStream = null
             commandOutputStream = null
             commandSocket = null

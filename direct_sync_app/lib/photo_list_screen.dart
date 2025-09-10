@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 // Use the same method channel defined in main.dart
 const platform = MethodChannel('com.example.direct_sync_app/camera');
@@ -13,39 +14,165 @@ class PhotoListScreen extends StatefulWidget {
 }
 
 class _PhotoListScreenState extends State<PhotoListScreen> {
+  // Scroll controller for infinite scroll pagination
+  final ScrollController _scrollController = ScrollController();
   List<Map<String, dynamic>> _photos = [];
   bool _isLoading = true;
+  bool _isLoadingMore = false;
   String _errorMessage = '';
+  Set<String> _syncedPhotoIds = {};
+
+  // Pagination parameters
+  int _currentPage = 0;
+  final int _photosPerPage = 20; // Number of photos to load per page
+  bool _hasMorePhotos = true; // Flag to track if more photos are available
 
   @override
   void initState() {
     super.initState();
+
+    // Setup scroll controller for infinite scrolling
+    _scrollController.addListener(_scrollListener);
+
+    // Load initial photos
     _loadPhotos();
   }
 
-  Future<void> _loadPhotos() async {
-    setState(() {
-      _isLoading = true;
-      _errorMessage = '';
-    });
+  @override
+  void dispose() {
+    _scrollController.removeListener(_scrollListener);
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  // Listener for scroll events to handle infinite scrolling
+  void _scrollListener() {
+    if (!_isLoading && !_isLoadingMore && _hasMorePhotos) {
+      if (_scrollController.position.pixels >=
+          _scrollController.position.maxScrollExtent * 0.8) {
+        // User scrolled to 80% of the list, load more photos
+        _loadPhotos(reset: false);
+      }
+    }
+  }
+
+  // Method is now used in onTap of the refresh button
+
+  Future<void> _loadPhotos({bool reset = true}) async {
+    if (reset) {
+      setState(() {
+        _isLoading = true;
+        _errorMessage = '';
+        _currentPage = 0;
+        _hasMorePhotos = true;
+        _photos = [];
+      });
+    } else {
+      setState(() {
+        _isLoadingMore = true;
+      });
+    }
 
     try {
-      final result = await platform.invokeMethod('getDownloadedPhotos');
+      // First, get synced photo IDs from PhotoSyncService
+      await _loadSyncedPhotoIds();
 
-      List<Map<String, dynamic>> photoList = [];
-      for (var photo in result) {
-        photoList.add(Map<String, dynamic>.from(photo));
+      final Map<String, dynamic> args = {
+        'page': _currentPage,
+        'pageSize': _photosPerPage,
+      };
+
+      dynamic result;
+      try {
+        // Try to use the paginated method
+        result = await platform.invokeMethod(
+          'getDownloadedPhotosPaginated',
+          args,
+        );
+      } catch (e) {
+        // Fallback to non-paginated method if the new method isn't implemented yet
+        print(
+          'Warning: getDownloadedPhotosPaginated not implemented, falling back to getDownloadedPhotos',
+        );
+        final List<dynamic> photos = await platform.invokeMethod(
+          'getDownloadedPhotos',
+        );
+
+        // Create a compatible result structure
+        final int start = _currentPage * _photosPerPage;
+        final int end = start + _photosPerPage;
+
+        // Apply pagination manually
+        final List<dynamic> pagedPhotos =
+            photos.length > start
+                ? photos.sublist(
+                  start,
+                  photos.length > end ? end : photos.length,
+                )
+                : [];
+
+        result = {'photos': pagedPhotos, 'hasMore': end < photos.length};
       }
 
+      // Check if we've reached the end
+      final bool hasMore = result['hasMore'] as bool? ?? false;
+      final List<dynamic> photosData = result['photos'] as List<dynamic>? ?? [];
+
+      List<Map<String, dynamic>> photoList = [];
+      for (var photo in photosData) {
+        final photoMap = Map<String, dynamic>.from(photo);
+
+        // Check if this photo is synced and add the synced status
+        final String photoId =
+            photoMap['id']?.toString() ??
+            photoMap['filename']?.toString() ??
+            '';
+        photoMap['synced'] = _syncedPhotoIds.contains(photoId);
+
+        photoList.add(photoMap);
+      }
+
+      // Increment page for next load and update hasMore flag
+      _currentPage++;
+      _hasMorePhotos = hasMore;
+
       setState(() {
-        _photos = photoList;
+        if (reset) {
+          _photos = photoList;
+        } else {
+          _photos.addAll(photoList);
+        }
         _isLoading = false;
+        _isLoadingMore = false;
       });
+
+      print(
+        'Loaded ${photoList.length} photos (total: ${_photos.length}, hasMore: $_hasMorePhotos)',
+      );
     } catch (e) {
       setState(() {
         _errorMessage = 'Error loading photos: $e';
         _isLoading = false;
+        _isLoadingMore = false;
+        _hasMorePhotos = false; // Assume no more photos on error
       });
+      print('Error loading photos: $e');
+    }
+  }
+
+  // Load synced photo IDs from PhotoSyncService
+  Future<void> _loadSyncedPhotoIds() async {
+    try {
+      // Use the PhotoSyncService to get synced photo IDs
+      // First load the IDs from SharedPreferences
+      final prefs = await SharedPreferences.getInstance();
+      final syncedIds = prefs.getStringList('syncedPhotoIds') ?? [];
+      _syncedPhotoIds = syncedIds.toSet();
+      print(
+        'Loaded ${_syncedPhotoIds.length} synced photo IDs in PhotoListScreen',
+      );
+    } catch (e) {
+      print('Error loading synced photo IDs in PhotoListScreen: $e');
     }
   }
 
@@ -68,8 +195,21 @@ class _PhotoListScreenState extends State<PhotoListScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed: _loadPhotos,
-            tooltip: 'Refresh list',
+            onPressed: () async {
+              // Load photos again and also refresh synced status
+              await _loadPhotos();
+
+              // Show confirmation
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Photos and sync status refreshed'),
+                    duration: Duration(seconds: 1),
+                  ),
+                );
+              }
+            },
+            tooltip: 'Refresh list and sync status',
           ),
           IconButton(
             icon: const Icon(Icons.delete_outline),
@@ -120,72 +260,105 @@ class _PhotoListScreenState extends State<PhotoListScreen> {
       );
     }
 
-    return ListView.builder(
-      itemCount: _photos.length,
-      itemBuilder: (context, index) {
-        // Display photos in reverse order (newest first)
-        final photo = _photos[_photos.length - 1 - index];
-        final path = photo['path'] as String;
-        final filename = photo['filename'] as String;
-        final timestamp = photo['timestamp'] as int;
-        final width = photo['width'] as int? ?? 0;
-        final height = photo['height'] as int? ?? 0;
-        final size = photo['size'] as int? ?? 0;
-
-        // Format the timestamp as a readable date/time
-        final date = DateTime.fromMillisecondsSinceEpoch(timestamp);
-        final formattedDate =
-            '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')} '
-            '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}:${date.second.toString().padLeft(2, '0')}';
-
-        // Format the file size as KB or MB
-        String formattedSize;
-        if (size < 1024 * 1024) {
-          formattedSize = '${(size / 1024).toStringAsFixed(1)} KB';
-        } else {
-          formattedSize = '${(size / (1024 * 1024)).toStringAsFixed(1)} MB';
-        }
-
-        return Card(
-          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-          child: ListTile(
-            contentPadding: const EdgeInsets.all(8),
-            leading: Container(
-              width: 60,
-              height: 60,
-              decoration: BoxDecoration(
-                color: Colors.grey[300],
-                borderRadius: BorderRadius.circular(4),
+    return RefreshIndicator(
+      onRefresh: () => _loadPhotos(reset: true),
+      child: ListView.builder(
+        controller: _scrollController,
+        itemCount:
+            _photos.length +
+            (_hasMorePhotos ? 1 : 0), // Add one for the loading indicator
+        itemBuilder: (context, index) {
+          // Show loading indicator at the end
+          if (index == _photos.length && _hasMorePhotos) {
+            return const Center(
+              child: Padding(
+                padding: EdgeInsets.all(16.0),
+                child: CircularProgressIndicator(),
               ),
-              child:
-                  File(path).existsSync()
-                      ? Image.file(
-                        File(path),
-                        fit: BoxFit.cover,
-                        errorBuilder: (context, error, stackTrace) {
-                          return const Icon(Icons.broken_image, size: 30);
-                        },
-                      )
-                      : const Icon(Icons.photo, size: 30),
+            );
+          }
+          // Display photos in reverse order (newest first)
+          final photo = _photos[_photos.length - 1 - index];
+          final path = photo['path'] as String;
+          final filename = photo['filename'] as String;
+          final timestamp = photo['timestamp'] as int;
+          final width = photo['width'] as int? ?? 0;
+          final height = photo['height'] as int? ?? 0;
+          final size = photo['size'] as int? ?? 0;
+
+          // Format the timestamp as a readable date/time
+          final date = DateTime.fromMillisecondsSinceEpoch(timestamp);
+          final formattedDate =
+              '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')} '
+              '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}:${date.second.toString().padLeft(2, '0')}';
+
+          // Format the file size as KB or MB
+          String formattedSize;
+          if (size < 1024 * 1024) {
+            formattedSize = '${(size / 1024).toStringAsFixed(1)} KB';
+          } else {
+            formattedSize = '${(size / (1024 * 1024)).toStringAsFixed(1)} MB';
+          }
+
+          return Card(
+            margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            child: ListTile(
+              contentPadding: const EdgeInsets.all(8),
+              leading: Container(
+                width: 60,
+                height: 60,
+                decoration: BoxDecoration(
+                  color: Colors.grey[300],
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child:
+                    File(path).existsSync()
+                        ? Image.file(
+                          File(path),
+                          fit: BoxFit.cover,
+                          errorBuilder: (context, error, stackTrace) {
+                            return const Icon(Icons.broken_image, size: 30);
+                          },
+                        )
+                        : const Icon(Icons.photo, size: 30),
+              ),
+              title: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      filename,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color:
+                            photo['synced'] == true
+                                ? Colors.green.shade700
+                                : Colors.black,
+                      ),
+                    ),
+                  ),
+                  if (photo['synced'] == true)
+                    Icon(
+                      Icons.cloud_done,
+                      color: Colors.green.shade700,
+                      size: 16,
+                    ),
+                ],
+              ),
+              subtitle: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Date: $formattedDate'),
+                  Text('Size: $formattedSize, Resolution: ${width}x$height'),
+                ],
+              ),
+              isThreeLine: true,
+              onTap: () => _showPhotoDetails(photo, context),
             ),
-            title: Text(
-              filename,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontWeight: FontWeight.bold),
-            ),
-            subtitle: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Date: $formattedDate'),
-                Text('Size: $formattedSize, Resolution: ${width}x$height'),
-              ],
-            ),
-            isThreeLine: true,
-            onTap: () => _showPhotoDetails(photo, context),
-          ),
-        );
-      },
+          );
+        },
+      ),
     );
   }
 
@@ -264,9 +437,16 @@ class PhotoDetailScreen extends StatelessWidget {
       formattedSize = '${(size / (1024 * 1024)).toStringAsFixed(1)} MB';
     }
 
+    final bool isSynced = photo['synced'] == true;
+
     return Scaffold(
       appBar: AppBar(
-        title: Text(filename),
+        title: Row(
+          children: [
+            Expanded(child: Text(filename)),
+            if (isSynced) Icon(Icons.cloud_done, color: Colors.green, size: 20),
+          ],
+        ),
         actions: [
           IconButton(
             icon: const Icon(Icons.share),
@@ -338,13 +518,21 @@ class PhotoDetailScreen extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  filename,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 16,
-                  ),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        filename,
+                        style: TextStyle(
+                          color: isSynced ? Colors.green : Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
+                    ),
+                    if (isSynced)
+                      Icon(Icons.cloud_done, color: Colors.green, size: 16),
+                  ],
                 ),
                 const SizedBox(height: 4),
                 Text(

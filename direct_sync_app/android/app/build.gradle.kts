@@ -24,7 +24,7 @@ android {
         applicationId = "com.example.direct_sync_app"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        minSdk = 24 
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
@@ -41,4 +41,19 @@ android {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // libaums core library for USB mass storage access
+    implementation("me.jahnen.libaums:core:0.10.0")
+    
+    // Optional modules based on your needs
+    // HTTP server module for streaming/sharing USB content
+    // implementation("me.jahnen.libaums:httpserver:0.6.2")
+    
+    // Storage provider module for Storage Access Framework integration
+    // implementation("me.jahnen.libaums:storageprovider:0.6.2")
+    
+    // If you experience USB connectivity issues on Android 9+ devices, consider using the libusb module
+    // implementation("me.jahnen.libaums:libusbcommunication:0.4.0")
 }

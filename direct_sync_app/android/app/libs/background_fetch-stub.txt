@@ -1,0 +1,3 @@
+// This is a stub class that won't actually be used
+// We'll implement the complete functionality in Dart
+// This is just to satisfy the dependency resolver
