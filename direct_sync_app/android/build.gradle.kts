@@ -1,3 +1,6 @@
+// Define kotlin version
+val kotlin_version = "1.9.10" // Use the latest stable version compatible with your project
+
 allprojects {
     repositories {
         google()

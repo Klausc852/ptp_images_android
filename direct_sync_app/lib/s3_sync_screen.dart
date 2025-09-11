@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'photo_sync_service.dart';
 import 'sync_logs_manager.dart';
 import 'awsController/s3_func.dart';
@@ -37,7 +38,7 @@ class _S3SyncScreenState extends State<S3SyncScreen> {
     DateTime.now().year,
     DateTime.now().month,
     DateTime.now().day,
-    0,
+    6,
     0,
     0,
   );
@@ -59,8 +60,11 @@ class _S3SyncScreenState extends State<S3SyncScreen> {
   void initState() {
     super.initState();
 
+    // Load saved album name
+    _loadSavedAlbumName();
+
     // Initialize controllers with default values
-    _albumNameController.text = _albumName;
+    // We'll set the album name controller text after loading from preferences
     _photoQuantityController.text = _photoQuantity.toString();
 
     // Initialize photo sync service
@@ -68,6 +72,89 @@ class _S3SyncScreenState extends State<S3SyncScreen> {
 
     // Configure AWS Amplify
     _configureAmplify();
+  }
+
+  // Load saved preferences from SharedPreferences
+  Future<void> _loadSavedAlbumName() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+
+      // Load album name
+      final savedAlbumName = prefs.getString('last_album_name');
+      if (savedAlbumName != null && savedAlbumName.isNotEmpty) {
+        setState(() {
+          _albumName = savedAlbumName;
+          _albumNameController.text = savedAlbumName;
+        });
+        _addLog('Loaded saved album name: $savedAlbumName');
+      } else {
+        _albumNameController.text = _albumName;
+      }
+
+      // Load filter datetime
+      final savedDateTimeMs = prefs.getInt('last_filter_datetime');
+      if (savedDateTimeMs != null) {
+        final savedDateTime = DateTime.fromMillisecondsSinceEpoch(
+          savedDateTimeMs,
+        );
+        setState(() {
+          _filterDateTime = savedDateTime;
+        });
+        _photoSyncService.setFilterDateTime(savedDateTime);
+        _addLog(
+          'Loaded saved filter datetime: ${_formatDateTime(savedDateTime)}',
+        );
+      }
+
+      // Load photo quantity
+      final savedQuantity = prefs.getInt('last_photo_quantity');
+      if (savedQuantity != null && savedQuantity > 0) {
+        setState(() {
+          _photoQuantity = savedQuantity;
+          _photoQuantityController.text = savedQuantity.toString();
+        });
+        _addLog('Loaded saved photo quantity: $savedQuantity');
+      } else {
+        _photoQuantityController.text = _photoQuantity.toString();
+      }
+    } catch (e) {
+      _addLog('Error loading saved preferences: $e');
+      _albumNameController.text = _albumName;
+      _photoQuantityController.text = _photoQuantity.toString();
+    }
+  }
+
+  // Save the album name to SharedPreferences
+  Future<void> _saveAlbumName(String albumName) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('last_album_name', albumName);
+    } catch (e) {
+      _addLog('Error saving album name: $e');
+    }
+  }
+
+  // Save the filter datetime to SharedPreferences
+  Future<void> _saveFilterDateTime(DateTime dateTime) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(
+        'last_filter_datetime',
+        dateTime.millisecondsSinceEpoch,
+      );
+    } catch (e) {
+      _addLog('Error saving filter datetime: $e');
+    }
+  }
+
+  // Save the photo quantity to SharedPreferences
+  Future<void> _savePhotoQuantity(int quantity) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt('last_photo_quantity', quantity);
+    } catch (e) {
+      _addLog('Error saving photo quantity: $e');
+    }
   }
 
   // Initialize AWS Amplify
@@ -168,6 +255,9 @@ class _S3SyncScreenState extends State<S3SyncScreen> {
       _filterDateTime = dateTime;
       _statusMessage = 'Found ${_photos.length} photos ';
     });
+
+    // Save the filter datetime to preferences
+    _saveFilterDateTime(dateTime);
   }
 
   // Format datetime for display
@@ -453,10 +543,67 @@ class _S3SyncScreenState extends State<S3SyncScreen> {
 
     await Future.delayed(const Duration(seconds: 1));
 
-    if (failCount > 0) {
+    // Check if there are failed photos that could be retried
+    List<Photo> failedPhotos = _photos.where((p) => p.syncFailed && p.retryCount < 4).toList();
+    
+    if (failCount > 0 && failedPhotos.isNotEmpty) {
+      _updateProgress(
+        0.95,
+        'Found ${failedPhotos.length} failed photos eligible for retry (max 4 attempts)...',
+      );
+      
+      // Retry failed photos
+      int retrySuccesses = 0;
+      
+      for (int i = 0; i < failedPhotos.length; i++) {
+        Photo photo = failedPhotos[i];
+        
+        _updateProgress(
+          0.95,
+          'Retrying ${photo.name} (attempt ${photo.retryCount} of 4)...',
+        );
+        
+        try {
+          // Check if the photo has a valid file path
+          final File? assetFile = await photo.asset?.file;
+          if (assetFile == null) {
+            _addLog('Error: Could not access file for ${photo.name} on retry');
+            continue;
+          }
+
+          // Use the uploadRawImageToS3 function 
+          final uploadResult = await uploadRawImageToS3(
+            _albumName,
+            photo.name,
+            assetFile.path,
+          );
+
+          if (uploadResult != null) {
+            // Mark the photo as synced
+            await _photoSyncService.markPhotoAsSynced(photo.id);
+            _addLog('Retry successful for ${photo.name}');
+            retrySuccesses++;
+            failCount--;  // Reduce the failure count
+            successCount++;  // Increase success count
+          } else {
+            _addLog('Retry failed for ${photo.name} (attempt ${photo.retryCount} of 4)');
+          }
+        } catch (e) {
+          _addLog('Error during retry for ${photo.name}: $e');
+        }
+        
+        // Small delay between retries to prevent overloading
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
+      
       _updateProgress(
         1.0,
-        'Sync completed with $successCount successful uploads and $failCount failures',
+        'Sync completed with $successCount successful uploads ($retrySuccesses from retries) and $failCount failures',
+      );
+    } else if (failCount > 0) {
+      _updateProgress(
+        1.0,
+        'Sync completed with $successCount successful uploads and $failCount failures (no more retries available)',
       );
     } else {
       _updateProgress(
@@ -615,6 +762,10 @@ class _S3SyncScreenState extends State<S3SyncScreen> {
 
     // Update the album name in the PhotoSyncService
     _photoSyncService.setAlbumName(trimmedValue);
+
+    // Save the album name to SharedPreferences
+    _saveAlbumName(trimmedValue);
+
     _addLog('Album name updated to: $trimmedValue');
   }
 
@@ -626,6 +777,9 @@ class _S3SyncScreenState extends State<S3SyncScreen> {
         setState(() {
           _photoQuantity = quantity;
         });
+
+        // Save the photo quantity to preferences
+        _savePhotoQuantity(quantity);
 
         // Reload photos with the new quantity if not currently loading
         if (!_isLoading) {

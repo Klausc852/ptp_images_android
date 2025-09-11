@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:workmanager/workmanager.dart';
 
 // Photo model to track selection state
 class Photo {
@@ -17,6 +18,7 @@ class Photo {
   bool isSelected;
   bool synced; // Track if the photo has been synced
   bool syncFailed; // Track if sync failed for this photo
+  int retryCount = 0; // Counter for sync retry attempts
 
   Photo({
     required this.id,
@@ -27,6 +29,7 @@ class Photo {
     this.isSelected = false,
     this.synced = false, // Default to not synced
     this.syncFailed = false, // Default to not failed
+    this.retryCount = 0, // Default to no retries
   });
 }
 
@@ -183,6 +186,7 @@ class PhotoSyncService {
       if (photo.id == photoId) {
         photo.syncFailed = true;
         photo.synced = false; // Not synced if it failed
+        photo.retryCount++; // Increment retry count
       }
     }
 
@@ -190,10 +194,42 @@ class PhotoSyncService {
       if (photo.id == photoId) {
         photo.syncFailed = true;
         photo.synced = false; // Not synced if it failed
+        photo.retryCount++; // Increment retry count
       }
     }
-
+    
     // Leave in new photos queue if failed - we'll try again later
+  }
+  
+  // Reset retry count for a photo (useful when manually retrying)
+  Future<void> resetRetryCount(String photoId) async {
+    for (var photo in _allPhotos) {
+      if (photo.id == photoId) {
+        photo.retryCount = 0;
+      }
+    }
+    
+    for (var photo in _filteredPhotos) {
+      if (photo.id == photoId) {
+        photo.retryCount = 0;
+      }
+    }
+  }
+  
+  // Reset retry counts for all failed photos
+  Future<void> resetAllRetryCounts() async {
+    for (var photo in _allPhotos) {
+      if (photo.syncFailed) {
+        photo.retryCount = 0;
+      }
+    }
+    
+    for (var photo in _filteredPhotos) {
+      if (photo.syncFailed) {
+        photo.retryCount = 0;
+      }
+    }
+  }
 
     // Notify listeners that the photo list has changed
     _notifyPhotosLoadedCallbacks();
@@ -366,6 +402,13 @@ class PhotoSyncService {
           : 'Auto-sync disabled',
     );
 
+    // Register or unregister background tasks with Workmanager
+    if (enabled) {
+      await _registerBackgroundPhotoCheck();
+    } else {
+      await _unregisterBackgroundPhotoCheck();
+    }
+
     // We still keep the in-app periodic check for UI responsiveness
     if (enabled && _periodicCheckSubscription == null) {
       _setupPeriodicPhotoCheck();
@@ -419,7 +462,50 @@ class PhotoSyncService {
     }
   }
 
-  // Set up periodic check for new photos
+  // Register background task with Workmanager
+  Future<void> _registerBackgroundPhotoCheck() async {
+    try {
+      // Register periodic task
+      await Workmanager().registerPeriodicTask(
+        'photoCheckTask', // Unique name for this task
+        'photoChangeCheckTask', // Task name defined in main.dart
+        frequency: const Duration(seconds: 30), // Run every 30 seconds
+        initialDelay: const Duration(
+          seconds: 10,
+        ), // Wait 10 seconds before first run
+        constraints: Constraints(
+          networkType:
+              NetworkType.connected, // Only run when network is available
+        ),
+        existingWorkPolicy:
+            ExistingWorkPolicy.replace, // Replace any existing task
+      );
+
+      _notifyLogCallbacks(
+        'Background photo check task registered (every 30 seconds)',
+      );
+      print('Background photo check task registered');
+    } catch (e) {
+      print('Failed to register background task: $e');
+      _notifyLogCallbacks('Failed to register background task: $e');
+    }
+  }
+
+  // Unregister background tasks
+  Future<void> _unregisterBackgroundPhotoCheck() async {
+    try {
+      // Cancel the task
+      await Workmanager().cancelByUniqueName('photoCheckTask');
+
+      _notifyLogCallbacks('Background photo check task unregistered');
+      print('Background photo check task unregistered');
+    } catch (e) {
+      print('Failed to unregister background task: $e');
+      _notifyLogCallbacks('Failed to unregister background task: $e');
+    }
+  }
+
+  // Set up periodic check for new photos (in-app)
   void _setupPeriodicPhotoCheck() {
     _periodicCheckStream = Stream.periodic(
       Duration(seconds: syncDurationSeconds),

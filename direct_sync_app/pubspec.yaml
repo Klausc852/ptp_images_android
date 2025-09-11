@@ -48,7 +48,7 @@ dependencies:
   
   # Background processing
   # background_fetch: ^1.2.1  # Has licensing issues with the Android SDK
-  # workmanager: ^0.5.2       # Alternative background processing solution
+  workmanager: ^0.7.0       # For background photo change checking every 30s
   # flutter_local_notifications: ^16.3.2  # For notifications
 
 dev_dependencies:

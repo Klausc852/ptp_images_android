@@ -5,6 +5,9 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+// Define kotlin version
+val kotlin_version = "1.9.10" // Use the latest stable version compatible with your project
+
 android {
     namespace = "com.example.direct_sync_app"
     compileSdk = flutter.compileSdkVersion
@@ -44,6 +47,11 @@ flutter {
 }
 
 dependencies {
+    // Kotlin dependencies
+    implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8:$kotlin_version")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.6.4")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.6.4")
+    
     // libaums core library for USB mass storage access
     implementation("me.jahnen.libaums:core:0.10.0")
     
@@ -56,4 +64,7 @@ dependencies {
     
     // If you experience USB connectivity issues on Android 9+ devices, consider using the libusb module
     // implementation("me.jahnen.libaums:libusbcommunication:0.4.0")
+    
+    // Flutter dependencies will be automatically added by the flutter build system
+    // but we need to ensure kotlin stdlib is properly available
 }

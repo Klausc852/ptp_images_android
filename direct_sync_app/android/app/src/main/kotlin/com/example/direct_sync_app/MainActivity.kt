@@ -6,7 +6,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.hardware.usb.*
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -17,7 +21,9 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 class MainActivity : FlutterActivity() {
-    private val CHANNEL = "com.example.direct_sync_app/camera"
+    private val CAMERA_CHANNEL = "com.example.direct_sync_app/camera"
+    private val BATTERY_OPTIMIZATION_CHANNEL = "com.example.direct_sync_app/battery_optimization"
+    private val BATTERY_CHANNEL = "com.example.direct_sync_app/battery_optimization"
     private val ACTION_USB_PERMISSION = "com.example.direct_sync_app.USB_PERMISSION"
     private val TAG = "CameraConnection"
     
@@ -108,7 +114,23 @@ class MainActivity : FlutterActivity() {
         // Track whether we're in started state for proper lifecycle management
         isInStarted = false
         
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
+        // Battery optimization channel
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, BATTERY_OPTIMIZATION_CHANNEL).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "isBatteryOptimizationDisabled" -> {
+                    result.success(isBatteryOptimizationDisabled())
+                }
+                "requestDisableBatteryOptimization" -> {
+                    requestDisableBatteryOptimization(result)
+                }
+                else -> {
+                    result.notImplemented()
+                }
+            }
+        }
+        
+        // Camera channel
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CAMERA_CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
                 "initializeCamera" -> {
                     initializeCamera(result)
@@ -585,7 +607,7 @@ class MainActivity : FlutterActivity() {
                                         "info" to info
                                     )
                                     flutterEngine?.dartExecutor?.binaryMessenger?.let { messenger ->
-                                        MethodChannel(messenger, CHANNEL)
+                                        MethodChannel(messenger, CAMERA_CHANNEL)
                                             .invokeMethod("onCameraEvent", event)
                                     }
                                 }
@@ -1051,6 +1073,32 @@ class MainActivity : FlutterActivity() {
             ConnectionType.USB -> ptpController.release()
             ConnectionType.WIFI -> ptpIpController.closeConnection()
             else -> {} // No connection to close
+        }
+    }
+    
+    // Battery optimization methods
+    private fun isBatteryOptimizationDisabled(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            return powerManager.isIgnoringBatteryOptimizations(packageName)
+        }
+        return true // On older Android versions, battery optimization is not an issue
+    }
+
+    private fun requestDisableBatteryOptimization(result: MethodChannel.Result) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                intent.data = Uri.parse("package:$packageName")
+                startActivity(intent)
+                result.success(true)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error requesting battery optimization: ${e.message}")
+                result.success(false)
+            }
+        } else {
+            // For older versions, just return true
+            result.success(true)
         }
     }
 }
