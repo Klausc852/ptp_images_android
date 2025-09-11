@@ -544,25 +544,26 @@ class _S3SyncScreenState extends State<S3SyncScreen> {
     await Future.delayed(const Duration(seconds: 1));
 
     // Check if there are failed photos that could be retried
-    List<Photo> failedPhotos = _photos.where((p) => p.syncFailed && p.retryCount < 4).toList();
-    
+    List<Photo> failedPhotos =
+        _photos.where((p) => p.syncFailed && p.retryCount < 4).toList();
+
     if (failCount > 0 && failedPhotos.isNotEmpty) {
       _updateProgress(
         0.95,
         'Found ${failedPhotos.length} failed photos eligible for retry (max 4 attempts)...',
       );
-      
+
       // Retry failed photos
       int retrySuccesses = 0;
-      
+
       for (int i = 0; i < failedPhotos.length; i++) {
         Photo photo = failedPhotos[i];
-        
+
         _updateProgress(
           0.95,
           'Retrying ${photo.name} (attempt ${photo.retryCount} of 4)...',
         );
-        
+
         try {
           // Check if the photo has a valid file path
           final File? assetFile = await photo.asset?.file;
@@ -571,7 +572,7 @@ class _S3SyncScreenState extends State<S3SyncScreen> {
             continue;
           }
 
-          // Use the uploadRawImageToS3 function 
+          // Use the uploadRawImageToS3 function
           final uploadResult = await uploadRawImageToS3(
             _albumName,
             photo.name,
@@ -583,19 +584,21 @@ class _S3SyncScreenState extends State<S3SyncScreen> {
             await _photoSyncService.markPhotoAsSynced(photo.id);
             _addLog('Retry successful for ${photo.name}');
             retrySuccesses++;
-            failCount--;  // Reduce the failure count
-            successCount++;  // Increase success count
+            failCount--; // Reduce the failure count
+            successCount++; // Increase success count
           } else {
-            _addLog('Retry failed for ${photo.name} (attempt ${photo.retryCount} of 4)');
+            _addLog(
+              'Retry failed for ${photo.name} (attempt ${photo.retryCount} of 4)',
+            );
           }
         } catch (e) {
           _addLog('Error during retry for ${photo.name}: $e');
         }
-        
+
         // Small delay between retries to prevent overloading
         await Future.delayed(const Duration(milliseconds: 500));
       }
-      
+
       _updateProgress(
         1.0,
         'Sync completed with $successCount successful uploads ($retrySuccesses from retries) and $failCount failures',
